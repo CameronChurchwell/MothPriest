@@ -3,17 +3,8 @@ from abc import ABC, abstractmethod
 import struct
 from typing import Union, List
 from functools import partial
-import lz4.block
 from tqdm import tqdm
 from io import BytesIO
-
-ess_path = Path('Save119_5378CC5C_0_44697661_WhiterunWorld_020918_20230401030541_47_1.ess')
-# ess_path = Path('Save15_5378CC5C_0_44697661_Tamriel_000533_20230119185501_5_1.ess')
-# ess_path = Path('Save1_5378CC5C_0_44697661_RealmLorkhan_000013_20221028054657_1_1.ess')
-if not ess_path.exists(): raise FileNotFoundError('save files does not exist')
-
-with open(ess_path, 'rb') as f:
-    content = f.read()
 
 Reference = Union[str, List[str]]
 
@@ -233,7 +224,7 @@ class ReferenceSizeStringParser(ReferenceSizeParser):
         return self._record.encode('utf-8')
     
 # TODO subclass from a matrix or tensor parser?
-class ReferencedSizeImageParser(ReferenceSizeParser):
+class ReferenceSizeImageParser(ReferenceSizeParser):
     """Class for parsing reference-sized image data"""
 
     def __init__(self, width_id: Reference, height_id: Reference, id: str, depth: Union[int, Reference] = 1, numColors: Union[int, Reference] = 4):
@@ -585,176 +576,5 @@ class ReferenceMappedParser(Parser):
     
     def unparse(self, record):
         return self._active.unparse(record)
-
-
-#some useful macros
-uint8 = partial(IntegerParser, 1)
-uint16 = partial(IntegerParser, 2)
-uint32 = partial(IntegerParser, 4)
-
-#skyrim specific macros
-wstring = partial(BlockParser, elements=[
-    uint16('length'), 
-    ReferenceSizeStringParser('value', 'length')
-])
-
-def growingDecompress(buffer: BytesIO, size=None):
-    """do lz4 block format decompress and double size of buffer until it fits"""
-    if size is None:
-        size = 1024 ** 2
-    try:
-        return lz4.block.decompress(buffer, uncompressed_size=size)
-    except lz4.block.LZ4BlockError:
-        return growingDecompress(buffer, size=size*2)
-
-def compress(record):
-    """compress using lz4 block"""
-    return lz4.block.compress(record, store_size=False)
-
-def identityTransform(input):
-    """Do nothing"""
-    return input
-
-header_info = BlockParser(
-    'headerInfo',
-    [
-        MagicParser('TESV_SAVEGAME', 'magic'),
-        IntegerParser(4, 'headerSize')
-    ],
-)
-header = ReferenceSizeBlockParser(
-    'header',
-    ['headerInfo', 'headerSize'],
-    [
-        uint32('version'),
-        uint32('saveNumber'),
-        wstring('playerName'),
-        uint32('playerLevel'),
-        wstring('playerLocation'),
-        wstring('gameDate'),
-        wstring('playerRace'),
-        uint16('playerSex'),
-        uint32('playerCurrentExp'),
-        uint32('playerNeededExp'),
-        uint32('fileDateLower'),
-        uint32('fileDateUpper'),
-        uint32('screenshotWidth'),
-        uint32('screenshotHeight'),
-        uint16('compressionType')
-    ]
-)
-
-screenshot = ReferencedSizeImageParser(
-    width_id=['header', 'screenshotWidth'],
-    height_id=['header', 'screenshotHeight'],
-    id='screenshotData'
-)
-
-plugin_info = BlockParser('pluginInfo', [
-    uint8('pluginInfoCount'),
-    ReferenceCountParser('pluginCountEntries', 'pluginInfoCount', wstring('plugin'))
-])
-
-# plugin_info = ReferenceCountParser(
-#     'pluginInfo',
-#     'pluginInfoCount',
-#     uint8('pluginInfoCount'),
-#     wstring('plugin')
-# )
-
-file_location = BlockParser(
-    'fileLocationTable',
-    [
-        uint32('formIDArrayCountOffset'),
-        uint32('unknownTable3Offset'),
-        uint32('globalDataTable1Offset'),
-        uint32('globalDataTable2Offset'),
-        uint32('changeFormsOffset'),
-        uint32('globalDataTable3Offset'),
-        uint32('globalDataTable1Count'),
-        uint32('globalDataTable2Count'),
-        uint32('globalDataTable3Count'),
-        uint32('changeFormCount'),
-        FixedPaddingParser(15*4)
-    ]
-)
-
-global_data_entry = BlockParser('globalData', [
-    uint32('type'),
-    uint32('length'),
-    ReferenceSizeRawParser('value', 'length')
-])
-
-refID = FixedSizeRawParser('RefID', 3)
-
-change_form_type_flags = BlockParser('flags', [
-    uint8('lengths_size'),
-    uint8('form_type')
-])
-
-change_form_type = BytesExpansionParser('type', 1, [2, 6], change_form_type_flags)
-
-change_form_entry = BlockParser('changeFormEntry', [
-    refID,
-    FixedSizeRawParser('changeFlags', 4),
-    change_form_type,
-    uint8('version'),
-    ReferenceMappedParser('length1', ['type', 'lengths_size'], {
-        0: uint8(None),
-        1: uint16(None),
-        2: uint32(None)
-    }),
-    ReferenceMappedParser('length2', ['type', 'lengths_size'], {
-        0: uint8(None),
-        1: uint16(None),
-        2: uint32(None)
-    }),
-    ReferenceSizeRawParser('data', 'length1')
-])
-
-form_id_entry = BlockParser('formID', [
-    FixedSizeRawParser('objectID', 3),
-    uint8('pluginID'),
-])
-
-#note to self: use default dict in ReferenceMappedParser to get a default path
-
-file = BlockParser(
-    'file',
-    [
-        header_info,
-        header,
-        screenshot,
-        uint32('uncompressedSize'),
-        uint32('compressedSize'),
-        TransformationParser(
-            'compressedContainer',
-            'compressedSize',
-            growingDecompress,
-            compress,
-            # PDBParser('debug')
-            BlockParser('compressedContent', [
-                uint8('formVersion'),
-                uint32('pluginInfoSize'),
-                plugin_info,
-                file_location,
-                ReferenceCountParser('globalDataTable1', ['fileLocationTable', 'globalDataTable1Count'], global_data_entry),
-                ReferenceCountParser('globalDataTable2', ['fileLocationTable', 'globalDataTable2Count'], global_data_entry),
-                ReferenceCountParser('changeForms', ['fileLocationTable', 'changeFormCount'], change_form_entry),
-                ReferenceCountParser('globalDataTable3', ['fileLocationTable', 'globalDataTable3Count'], global_data_entry),
-                uint32('formIDArrayCount'),
-                ReferenceCountParser('formIDArray', 'formIDArrayCount', form_id_entry)
-                # ReferenceCountParser('debug', ['fileLocationTable', 'changeFormCount'], FixedSizeRawParser('', 1))
-                # DebugRemainderParser(100)
-                # RawParser('remainder')
-            ])
-        )
-    ],
-)
-
-#@profile
-def parse_save():
-    result = file.parse(BytesIO(content))
-    print(result)
-parse_save()
-# result
+    
+#TODO add macros to this package
