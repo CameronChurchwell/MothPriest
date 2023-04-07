@@ -5,8 +5,7 @@ from functools import partial
 from tqdm import tqdm
 from io import BytesIO
 from PIL import Image
-
-Reference = Union[str, List[str]]
+from ..references import *
 
 class Parser(ABC):
     """Abstract base class for parser objects"""
@@ -56,30 +55,44 @@ class Parser(ABC):
     #         except KeyError:
     #             raise ValueError(f"failed to find referenced size {' -> '.join(reference)} for object {self.id}")
 
-    def getReference(self, record, reference):
-        """retrieve a referenced value given a record and a reference"""
-        #TODO refactor to use recursion
-        #TODO add support of lists, not just dictionaries
-        if record is None:
-            raise ValueError(f'no record passed for element with id {self.id}')
-        if isinstance(reference, list):
-            if len(reference) == 1:
-                return self.getReference(record, reference[0])
-            else:
-                subRecord = self.getReference(
-                    record,
-                    reference[0]
-                )
-                if subRecord is None:
-                    raise ValueError('subRecord is None')
-                return self.getReference(
-                    subRecord,
-                    reference[1:]
-                )
-        elif (isinstance(reference, int) and isinstance(record, list)) or (isinstance(reference, str) and isinstance(record, dict)):
-            return record[reference]
+    # def getReference(self, record, reference):
+    #     """retrieve a referenced value given a record and a reference"""
+    #     #TODO refactor to use recursion
+    #     #TODO add support of lists, not just dictionaries
+    #     if record is None:
+    #         raise ValueError(f'no record passed for element with id {self.id}')
+    #     if isinstance(reference, list):
+    #         if len(reference) == 1:
+    #             return self.getReference(record, reference[0])
+    #         else:
+    #             subRecord = self.getReference(
+    #                 record,
+    #                 reference[0]
+    #             )
+    #             if subRecord is None:
+    #                 raise ValueError('subRecord is None')
+    #             return self.getReference(
+    #                 subRecord,
+    #                 reference[1:]
+    #             )
+    #     elif (isinstance(reference, int) and isinstance(record, list)) or (isinstance(reference, str) and isinstance(record, dict)):
+    #         return record[reference]
+    #     else:
+    #         raise ValueError('Invalid (record, reference) pair')
+
+    def getReference(self, record, reference: Union[Reference, str, int, List[str]]):
+        """allows the use of strings and lists of strings in place of the corresponding Reference subclasses"""
+        if isinstance(reference, Reference):
+            ref = reference
+        elif isinstance(reference, str):
+            ref = IDReference(reference)
+        elif isinstance(reference, int):
+            ref = ConstIntegerReference(reference)
+        elif isinstance(reference, list):
+            ref = IDListReference(reference)
         else:
-            raise ValueError('Invalid (record, reference) pair')
+            import pdb; pdb.set_trace()
+        return ref.retrieveRecord(record)
 
 class FixedSizeParser(Parser):
     """Abstract subclass for parsing a fixed number of bytes"""
@@ -444,10 +457,13 @@ class ReferenceCountParser(Parser):
         )
         ep = self.element_parser
         ep.updateRecord(record)
-        for _ in iterator:
-            ep.updateRecord(record)
-            element_record = ep.parse(buffer)
-            record.append(element_record)
+        try:
+            for _ in iterator:
+                ep.updateRecord(record)
+                element_record = ep.parse(buffer)
+                record.append(element_record)
+        except TypeError:
+            import pdb; pdb.set_trace()
         return record
         
 
@@ -463,17 +479,13 @@ class ReferenceCountParser(Parser):
         return result
 
 
-class DebugRemainderParser(Parser):
+class DebugRemainderParser(FixedSizeParser):
 
     def __init__(self, size: int):
-        super().__init__('debug')
-        self.size = size
+        super().__init__('debug', size)
 
-    def parse(self, data: bytes):
-        print(len(data))
-        data = data[:self.size]
-        for i in range(0, len(data)):
-            print(data[i:i+1])
+    def parse(self, buffer: BytesIO):
+        return buffer.read(self.size)
 
     def getSize(self):
         return None
@@ -597,5 +609,33 @@ class ReferenceMappedParser(Parser):
     
     def unparse(self, record):
         return self._active.unparse(record)
+    
+class ReferenceSizeChunkParser(ReferenceSizeParser):
+    """Class for chunking the input bytes to allow for chunks to only be partially read if their size is known ahead of time"""
+
+    def __init__(self, id: str, size_id: Reference, parser: Parser):
+        super().__init__(id, size_id)
+        self.parser = parser
+
+    def parse(self, buffer: BytesIO):
+        chunk = BytesIO(buffer.read(self.getSize()))
+        self.parser.updateRecord(self._record)
+        return self.parser.parse(chunk)
+    
+    def unparse(self, record):
+        raise NotImplementedError('unparsing not yet implemented')
+    
+class EOFParser(Parser):
+
+    def getSize(self):
+        return None
+
+    def parse(self, buffer: BytesIO):
+        remainder = buffer.read()
+        if len(remainder) != 0:
+            raise ValueError(f'Expected eof but found {len(remainder)} bytes instead')
+    
+    def unparse(self):
+        raise NotImplementedError('not yet implemented')
     
 #TODO add macros to this package
