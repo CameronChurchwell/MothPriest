@@ -1,10 +1,10 @@
-from pathlib import Path
 from abc import ABC, abstractmethod
 import struct
 from typing import Union, List
 from functools import partial
 from tqdm import tqdm
 from io import BytesIO
+from PIL import Image
 
 Reference = Union[str, List[str]]
 
@@ -232,18 +232,20 @@ class ReferenceSizeImageParser(ReferenceSizeParser):
         self.height_id = height_id
         self.id = id
         self._record = {}
-        self.depth = depth
+        self.depth = depth #TODO convert to bits
         self.numColors = numColors
 
-    def getSize(self):
+    def _getDims(self):
         width = self.getReference(self._record, self.width_id)
         height = self.getReference(self._record, self.height_id)
-
         if isinstance(self.depth, int):
             depth = self.depth
         else:
             depth = self.getReference(self._record, self.depth)
+        return (width, height, depth)
 
+    def getSize(self):
+        width, height, depth = self._getDims()
         if isinstance(self.numColors, int):
             numColors = self.numColors
         else:
@@ -251,8 +253,27 @@ class ReferenceSizeImageParser(ReferenceSizeParser):
 
         return width*height*depth*numColors
     
-    def parse(self, buffer: bytes):
-        return buffer.read(self.getSize())
+    def _getMode(self):
+        """Get Pillow mode"""
+        if self.depth != 1:
+            raise ValueError('Currently only a byte-depth of 1 is supported')
+        colorsToMode = {
+            1: 'L',
+            3: 'RGB',
+            4: 'RGBA'
+        }
+
+        try:
+            return colorsToMode[self.numColors]
+        except KeyError:
+            raise ValueError(f'Unsupported number of colors {self.numColors}')
+    
+    def parse(self, buffer: BytesIO):
+        image_data = buffer.read(self.getSize())
+        width, height, depth = self._getDims()
+        mode = self._getMode()
+        image = Image.frombytes(mode, (width, height), image_data)
+        return image
     
     def unparse(self):
         return self._record
