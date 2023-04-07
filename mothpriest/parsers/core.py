@@ -403,49 +403,6 @@ class ReferenceCountParser(Parser):
             ep.id = i
             total += ep.getSize()
         return total
-    
-    # def parse(self, data: bytes):
-    #     record = []
-    #     ep = self.element_parser
-    #     iterator = tqdm(
-    #         range(0, self._count),
-    #         total=self._count,
-    #         dynamic_ncols=True
-    #     )
-    #     ep.updateRecord(record)
-    #     for i in iterator:
-    #         size = ep.getSize()
-    #         record.append(ep.parse(data[:size]))
-    #         ep.updateRecord(record[-1])
-    #         size = ep.getSize()
-    #         data = data[size:]
-    #     return record
-
-    #@profile
-    # def parse(self, data: bytes):
-    #     record = []
-    #     ep = self.element_parser
-    #     iterator = tqdm(
-    #         self._range,
-    #         total=self._count,
-    #         desc=self.id,
-    #         dynamic_ncols=True
-    #     )
-    #     ep.updateRecord(record)
-    #     data_offset = 0
-    #     for i in iterator:
-    #         ep.updateRecord([]) #TODO give parent?
-    #         ep.id = i
-    #         # ep.id = 0
-    #         size = ep.getSize()
-    #         element_record = ep.parse(data[data_offset:][:size])
-    #         record.append(element_record)
-    #         # record = [ep.parse(data[data_offset:][:size])]
-    #         ep.updateRecord(record)
-    #         size = ep.getSize()
-    #         # data = data[size:]
-    #         data_offset += size
-    #     return record
 
     def parse(self, buffer: BytesIO):
         record = []
@@ -629,6 +586,9 @@ class EOFParser(Parser):
 
     def getSize(self):
         return None
+    
+    def __init__(self):
+        super().__init__('_eof')
 
     def parse(self, buffer: BytesIO):
         remainder = buffer.read()
