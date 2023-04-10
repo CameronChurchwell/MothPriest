@@ -17,7 +17,7 @@ class Parser(ABC):
         """Updates internal storage of the records that have been parsed"""
         self._record = record
 
-    def getId(self):
+    def getID(self):
         """Returns the id of this element"""
         return self.id
 
@@ -137,11 +137,17 @@ class StructValueParser(FixedSizeParser):
 
     #@profile
     def parse(self, buffer: BytesIO):
+        """returns a list of unpacked values"""
         data = buffer.read(self.size)
         return struct.unpack(self.unpack_string, data)
     
     def unparse(self, buffer: BytesIO):
-        buffer.write(struct.pack(self.unpack_string, *self._record))
+        record = self._record[self.getID()]
+        try:
+            packed = struct.pack(self.unpack_string, *record)
+        except TypeError:
+            packed = struct.pack(self.unpack_string, record)
+        buffer.write(packed)
     
 class IntegerParser(StructValueParser):
     """Class for parsing packed integers with a given size"""
@@ -168,10 +174,18 @@ class IntegerParser(StructValueParser):
         super().__init__(size, format_string, id)
 
     def parse(self, buffer: BytesIO):
-        return super().parse(buffer)[0]
+        """returns a parsed integer"""
+        values = super().parse(buffer)
+        try:
+            assert len(values) == 1
+            assert isinstance(values[0], int)
+        except:
+            import pdb; pdb.set_trace()
+        return values[0]
     
     def unparse(self, buffer: BytesIO):
-        super().unparse([self._record], buffer)
+        #TODO this seems janky
+        super().unparse(buffer)
 
 class ReferenceSizeParser(Parser):
     """Abstract subclass for parsing a variable number of bytes given by a reference"""
@@ -193,7 +207,8 @@ class ReferenceSizeStringParser(ReferenceSizeParser):
         return value.decode('utf-8')
     
     def unparse(self, buffer: BytesIO):
-        buffer.write(self._record.encode('utf-8'))
+        record = self._record[self.getID()]
+        buffer.write(record.encode('utf-8'))
     
 # TODO subclass from a matrix or tensor parser?
 class ReferenceSizeImageParser(ReferenceSizeParser):
@@ -248,7 +263,8 @@ class ReferenceSizeImageParser(ReferenceSizeParser):
         return image
     
     def unparse(self, buffer: BytesIO):
-        image = self._record
+        record = self._record[self.getID()]
+        image = record
         image_bytes = image.tobytes()
         buffer.write(image_bytes)
 
@@ -279,16 +295,23 @@ class BlockParser(Parser):
         record = {'_parent': self._record}
         for element in self.elements:
             element.updateRecord(record)
-            record[element.getId()] = element.parse(buffer)
+            record[element.getID()] = element.parse(buffer)
         del record['_parent']
         return record
     
     def unparse(self, buffer: BytesIO):
+        try:
+            record = self._record[self.getID()]
+        except TypeError:
+            import pdb; pdb.set_trace()
         for element in self.elements:
             if element.id is not None:
-                element.unparse(self._record[element.id], buffer)
-            else:
-                element.unparse(self._record, buffer)
+                element.updateRecord(record)
+            try:
+                element.unparse(buffer)
+            except TypeError:
+                import pdb; pdb.set_trace()
+                element.unparse(buffer)
 
 class ReferenceSizeBlockParser(ReferenceSizeParser, BlockParser):
     """Class for parsing a block of elements which has a referenced size"""
@@ -310,7 +333,8 @@ class RawParser(Parser):
         return len(self.getReference(self._record, self.id))
 
     def unparse(self, buffer: BytesIO):
-        buffer.write(self._record)
+        record = self._record[self.getID()]
+        buffer.write(record)
     
 class ReferenceSizeRawParser(ReferenceSizeParser, RawParser):
     pass
@@ -327,7 +351,11 @@ class ReferenceCountParser(Parser):
     def updateRecord(self, record):
         super().updateRecord(record)
         self._count = self.getReference(self._record, self.count_id)
-        self._range = range(0, self._count)
+        try:
+            self._range = range(0, self._count)
+        except TypeError:
+            import pdb; pdb.set_trace()
+            pass
 
     def getSize(self):
         if self.id not in self._record:
@@ -357,12 +385,11 @@ class ReferenceCountParser(Parser):
 
     def unparse(self, buffer: BytesIO):
         id_base = self.element_parser.id
+        record = self._record[self.getID()]
         for i in range(0, self._count):
-            self.element_parser.id = id_base + f'_{i}'
-            if self.element_parser.id is not None:
-                self.element_parser.unparse(self._record[self.element_parser.id])
-            else:
-                self.element_parser.unparse(self._record)
+            self.element_parser.id = i
+            self.element_parser.updateRecord(record)
+            self.element_parser.unparse(buffer)
         self.element_parser.id = id_base
 
 class DebugRemainderParser(FixedSizeParser):
@@ -394,8 +421,9 @@ class TransformationParser(ReferenceSizeParser):
         return self.parser.parse(transformed)
     
     def unparse(self, buffer: BytesIO):
+        record = {self.parser.getID(): self._record[self.getID()]}
         tempbuf = BytesIO()
-        self.parser.updateRecord(self._record[self.parser.getId()])
+        self.parser.updateRecord(record)
         self.parser.unparse(tempbuf)
         tempbuf.seek(0)
         buffer.write(self.transformInverse(tempbuf.read()))
@@ -423,7 +451,7 @@ class BytesExpansionParser(FixedSizeParser, TransformationParser):
             # import pdb; pdb.set_trace()
             current_bits = bits[:bit_size]
             bits = bits[bit_size:]
-            offset = 8 - bit_size % 8
+            offset = (8 - bit_size) % 8
             for i in range(-offset, bit_size-offset, 8):
                 byte_value = int(current_bits[max(i, 0):i+8], 2)
                 result += struct.pack('B', byte_value)
@@ -457,6 +485,10 @@ class BytesExpansionParser(FixedSizeParser, TransformationParser):
         self.transform = partial(self._expand, bit_sizes=bit_sizes)
         self.transformInverse = partial(self._contract, bit_sizes=bit_sizes)
         self.parser = parser
+
+    def unparse(self, buffer: BytesIO):
+        # import pdb; pdb.set_trace()
+        return super().unparse(buffer)
 
     def getSize(self):
         return super().getSize()
@@ -500,7 +532,11 @@ class ReferenceMappedParser(Parser):
         return self._active.parse(data)
 
     def unparse(self, buffer: BytesIO):
-        self._active.unparse(self._record, buffer)
+        #need to shim record
+        record = self._record[self.getID()]
+        record = {self._active.getID(): record}
+        self._active.updateRecord(record)
+        self._active.unparse(buffer)
     
 class ReferenceSizeChunkParser(ReferenceSizeParser):
     """Class for chunking the input bytes to allow for chunks to only be partially read if their size is known ahead of time"""
@@ -509,13 +545,18 @@ class ReferenceSizeChunkParser(ReferenceSizeParser):
         super().__init__(id, size_id)
         self.parser = parser
 
+    def getID(self):
+        return self.parser.getID()
+
     def parse(self, buffer: BytesIO):
         chunk = BytesIO(buffer.read(self.getSize()))
         self.parser.updateRecord(self._record)
         return self.parser.parse(chunk)
     
     def unparse(self, buffer: BytesIO):
-        raise NotImplementedError('unparsing not yet implemented')
+        #need to shim record
+        self.parser.updateRecord(self._record)
+        self.parser.unparse(buffer)
     
 class EOFParser(Parser):
 
@@ -547,9 +588,10 @@ class FixedSizeHexParser(FixedSizeParser):
         return ''.join(hex_bytes)
         
     def unparse(self, buffer: BytesIO):
-        hex_bytes = bytes.fromhex(self._record)
+        record = self._record[self.getID()]
+        hex_bytes = bytes.fromhex(record)
         if self.little_endian:
-            hex_bytes = reversed(hex_bytes)
+            hex_bytes = bytes(reversed(hex_bytes))
         buffer.write(hex_bytes)
 
 # TODO implement fixed size as a constant value reference (refactor)
