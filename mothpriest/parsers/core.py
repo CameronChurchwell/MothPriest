@@ -291,9 +291,9 @@ class RawParser(Parser):
         return buffer.read(self.getSize())
     
     def getSize(self):
-        if self.id not in self._record:
+        if self._record is None:
             return None
-        return len(self.getReference(self._record, self.id))
+        return len(self._record)
 
     def unparse(self, buffer: BytesIO):
         buffer.write(self._record)
@@ -444,25 +444,15 @@ class ReferenceMappedParser(Parser):
         self._active._record = self._record
         self._active.unparse(buffer)
     
-class ReferenceSizeChunkParser(ReferenceSizeParser):
+class ReferenceSizeChunkParser(ReferenceSizeBlockParser):
     """Class for chunking the input bytes to allow for chunks to only be partially read if their size is known ahead of time"""
 
-    def __init__(self, id: str, size_id: Reference, parser: Parser):
-        super().__init__(id, size_id)
-        self.parser = parser
-
-    def getID(self):
-        return self.parser.getID()
+    def __init__(self, id: str, size_id: Reference, elements: List[Parser]):
+        super().__init__(id, size_id, elements + [RawParser('_remainder')])
 
     def parse(self, buffer: BytesIO):
         chunk = BytesIO(buffer.read(self.getSize()))
-        self.parser._parent = self._parent
-        self.parser.parse(chunk)
-        self._record = self.parser._record
-    
-    def unparse(self, buffer: BytesIO):
-        self.parser._record = self._record
-        self.parser.unparse(buffer)
+        super().parse(chunk)
     
 class EOFParser(Parser):
 
@@ -491,11 +481,10 @@ class FixedSizeHexParser(FixedSizeParser):
         hex_bytes = [format(byte, '02X') for byte in content]
         if self.little_endian:
             hex_bytes = reversed(hex_bytes)
-        return ''.join(hex_bytes)
+        self._record = ''.join(hex_bytes)
         
     def unparse(self, buffer: BytesIO):
-        record = self._record[self.getID()]
-        hex_bytes = bytes.fromhex(record)
+        hex_bytes = bytes.fromhex(self._record)
         if self.little_endian:
             hex_bytes = bytes(reversed(hex_bytes))
         buffer.write(hex_bytes)

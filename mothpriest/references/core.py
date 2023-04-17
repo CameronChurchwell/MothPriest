@@ -26,10 +26,9 @@ class Reference(ABC):
         elif isinstance(alias, int):
             return ConstIntegerReference(alias)
         elif isinstance(alias, list):
-            return IDListReference(alias)
+            return IDListReference([IDReference(s) for s in alias])
         else:
             raise ValueError(f'Unknown alias {alias}')
-
 
 class IDReference(Reference):
     """Class implementing ID references as strings for single level lookup"""
@@ -39,10 +38,12 @@ class IDReference(Reference):
 
     def retrieveRecord(self, parser: Union[BlockParser, ReferenceCountParser]):
         """retrieve the value corresponding to this reference from a given record"""
+        if self.id == '_parent':
+            return parser._parent
         try:
             return parser._record[self.id]
         except (KeyError, IndexError):
-            raise ValueError(f'failed to find reference {self.id} in record')
+            raise ValueError(f'failed to find reference {self.id} in record {parser._record}')
         
 class IDListReference(Reference):
     """Class implementing ID references which traverse levels in the record"""
@@ -56,7 +57,7 @@ class IDListReference(Reference):
             if not isinstance(p, (parsers.BlockParser, parsers.ReferenceCountParser)):
                 raise ValueError(f'cannot unpack IDListReference for parser type {p.__class__}')
             try:
-                p = p._record[ref]
+                p = p.getReference(ref)
             except (KeyError, IndexError):
                 raise ValueError(f'cannot retrieve reference {ref} from parser {p} with id {p.getID()}')
         return p
