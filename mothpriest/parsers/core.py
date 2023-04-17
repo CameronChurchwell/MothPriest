@@ -5,6 +5,7 @@ from typing import Union, List, Callable
 from functools import partial
 from io import BytesIO
 from PIL import Image
+import json
 from ..references import *
 
 class Parser(ABC):
@@ -34,6 +35,13 @@ class Parser(ABC):
         """get size of this element"""
         pass
 
+    def getAllRecords(self):
+        return str(self)
+
+    def __str__(self):
+        """get a string representation of the record stored in this parser"""
+        return str(self._record)
+
     def getReference(self, reference: Union[Reference, str, int, List[str]]):
         """allows the use of strings and lists of strings in place of the corresponding Reference subclasses"""
         ref = Reference.fromOther(reference)
@@ -55,7 +63,11 @@ class FixedSizeRawParser(FixedSizeParser):
 
     def parse(self, buffer: BytesIO):
         self._record = buffer.read(self.size)
-    
+
+    def getAllRecords(self):
+        # import pdb; pdb.set_trace()
+        return super().getAllRecords()
+
     def unparse(self, buffer: BytesIO):
         buffer.write(self._record)
 
@@ -90,7 +102,7 @@ class FixedSizeRawParser(FixedSizeParser):
 
 class MagicParser(FixedSizeParser):
     """Class for parsing magic strings, which usually exist at the beginning of a file to hint at its file type"""
-    
+
     def __init__(self, value: Union[str, bytes], id: str):
         """pass a size, the expected magic value, and an id"""
         size = len(value)
@@ -102,18 +114,17 @@ class MagicParser(FixedSizeParser):
         else:
             raise ValueError('expected value to be either bytes or str')
         super().__init__(id, len(value))
-        self.value = value
+        self._record = value
 
     def parse(self, buffer: BytesIO):
         """Raises a ValueError if the input does not exactly match the expected magic string"""
 
         data = buffer.read(self.getSize())
-        if not data == self.value:
+        if not data == self._record:
             raise ValueError('Magic did not match expected value. Check your parser and that you passed the correct file')
-        self._record = data
 
     def unparse(self, buffer: BytesIO):
-        buffer.write(self.value)
+        buffer.write(self._record)
 
 class StructValueParser(FixedSizeParser):
     """Class for parsing a packed value using struct.unpack"""
@@ -264,6 +275,13 @@ class BlockParser(Parser):
                 return None
             total += size
         return total
+    
+    def getAllRecords(self):
+        record = {id: parser.getAllRecords() for id, parser in self._record.items()}
+        return record
+
+    def __str__(self):
+        return json.dumps(self.getAllRecords())
 
     def parse(self, buffer: BytesIO):
         for id, element in self._record.items():
@@ -288,7 +306,7 @@ class ReferenceSizeBlockParser(ReferenceSizeParser, BlockParser):
 class RawParser(Parser):
 
     def parse(self, buffer: BytesIO):
-        return buffer.read(self.getSize())
+        self._record = buffer.read(self.getSize())
     
     def getSize(self):
         if self._record is None:
@@ -300,6 +318,9 @@ class RawParser(Parser):
     
 class ReferenceSizeRawParser(ReferenceSizeParser, RawParser):
     pass
+
+    def getAllRecords(self):
+        return super().getAllRecords()
     
 class ReferenceCountParser(Parser):
 
@@ -320,6 +341,14 @@ class ReferenceCountParser(Parser):
             size = element.getSize()
             total += size
         return total
+    
+    def getAllRecords(self):
+        records = [parser.getAllRecords() for parser in self._record]
+        return records
+    
+    def __str__(self):
+        l = self.getAllRecords
+        return json.dumps(l)
 
     def parse(self, buffer: BytesIO):
         self._count = self._parent.getReference(self.count_id)._record
@@ -355,13 +384,13 @@ class FixedPaddingParser(FixedSizeParser):
 
     def __init__(self, size: int):
         super().__init__(None, size)
+        self._record = b'\x00' * self.size
 
     def parse(self, buffer: BytesIO):
-        self._record = buffer.read(self.getSize())
+        buffer.read(self.getSize())
 
     def unparse(self, buffer: BytesIO):
-        new_padding = b'\x00' * self.size
-        buffer.write(new_padding)
+        buffer.write(self._record)
 
 class BytesExpansionParser(TransformationParser):
     """Class for expanding bytes to bits. Every byte gets expanded to 8 bytes each containing either x00 or x01.
@@ -371,7 +400,6 @@ class BytesExpansionParser(TransformationParser):
         result = b''
         bits = ''.join([format(byte, '08b') for byte in data])
         for bit_size in bit_sizes:
-            # import pdb; pdb.set_trace()
             current_bits = bits[:bit_size]
             bits = bits[bit_size:]
             offset = (8 - bit_size) % 8
@@ -434,6 +462,17 @@ class ReferenceMappedParser(Parser):
         self._getParser()
         return self._active.getSize()
     
+    def getAllRecords(self):
+        self._getParser()
+        self._active._record = self._record
+        return self._active.getAllRecords()
+    
+    def __str__(self):
+        self._getParser()
+        self._active._record = self._record
+        return str(self._active)
+
+    
     def parse(self, buffer: BytesIO):
         self._getParser()
         self._active.parse(buffer)
@@ -461,6 +500,7 @@ class EOFParser(Parser):
     
     def __init__(self):
         super().__init__('_eof')
+        self._record = 'EOF'
 
     def parse(self, buffer: BytesIO):
         remainder = buffer.read()
