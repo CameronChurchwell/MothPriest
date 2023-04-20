@@ -120,3 +120,5 @@ class FallbackChainReference(FallbackReference):
 
     def __init__(self, references: List[Reference]):
         super().__init__(references[0], FallbackChainReference(references[1:]))
+
+extendedReference = Union[Reference, str, int, List[str], None]
