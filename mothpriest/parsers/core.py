@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 import struct
 from collections import OrderedDict
-from typing import Union, List, Callable
+from typing import Union, List, Callable, Dict
 from functools import partial
 from io import BytesIO
 from PIL import Image
@@ -15,6 +15,7 @@ class Parser(ABC):
         self.id = id
         self._parent = None
         self._record = None
+        self._size = None
 
     def getID(self):
         """Returns the id of this element"""
@@ -36,11 +37,14 @@ class Parser(ABC):
         pass
 
     def getAllRecords(self):
-        return str(self)
+        return self
 
     def __str__(self):
         """get a string representation of the record stored in this parser"""
         return str(self._record)
+    
+    def __call__(self, buffer: BytesIO):
+        self.parse(buffer)
 
     def getReference(self, reference: Union[Reference, str, int, List[str]]):
         """allows the use of strings and lists of strings in place of the corresponding Reference subclasses"""
@@ -56,6 +60,14 @@ class Parser(ABC):
         if value is not None:
             self._record = value
         self._updateParent()
+
+    def _getInternalSize(self):
+        """get the size currently store in self._record, which may not be the same value as self.getSize()"""
+        dummy_stream = BytesIO()
+        self.unparse(dummy_stream)
+        new_size = dummy_stream.tell()
+        del dummy_stream
+        return new_size
 
 class FixedSizeParser(Parser):
     """Abstract subclass for parsing a fixed number of bytes"""
@@ -75,6 +87,9 @@ class FixedSizeParser(Parser):
             if new_size != self.size:
                 raise ValueError(f'new size {new_size} does not match fixed size {self.size} for parser {self.id}')
         self._updateParent()
+
+    def _getInternalSize(self):
+        return self.size
 
 class MagicParser(FixedSizeParser):
     """Class for parsing magic strings, which usually exist at the beginning of a file to hint at its file type"""
@@ -102,15 +117,21 @@ class MagicParser(FixedSizeParser):
     def unparse(self, buffer: BytesIO):
         buffer.write(self._record)
 
+    def __str__(self):
+        return str(self._record)
+    
+    def getAllRecords(self):
+        return str(self._record)
+
     def updateRecord(self, value=None):
         raise NotImplementedError('Cannot update magic record, operation is not permitted')
 
 class StructValueParser(FixedSizeParser):
     """Class for parsing a packed value using struct.unpack"""
     
-    def __init__(self, size: int, format_string: str, id: str):
+    def __init__(self, size: extendedReference, format_string: str, id: str):
         """Pass a size, a format string for the struct.unpack method, and an id"""
-        super().__init__(id, size)
+        super().__init__(id, self.getReference(size)._record)
         self.format_string = format_string
 
     def parse(self, buffer: BytesIO):
@@ -144,7 +165,7 @@ class IntegerParser(StructValueParser):
 
     def __init__(self, id: str, size: extendedReference, little_endian: bool = True, signed=False):
         """Pass a valid size (number of bytes), endianness, and whether or not the value is signed or unsigned"""
-        if not size in self.mapping.keys():
+        if not self.getReference(size)._record in self.mapping.keys():
             raise ValueError('Size not supported')
         
         format_string = self.mapping[size]
@@ -178,6 +199,7 @@ class ReferenceSizeParser(Parser):
     def __init__(self, id: str, size: extendedReference):
         super().__init__(id)
         self.size = size
+        self._size = None
 
     def getSize(self):
         """Retrieve a size from the record for already-parsed input"""
@@ -190,6 +212,12 @@ class ReferenceSizeParser(Parser):
             return self.getReference(self.size)._record
         return self._parent.getReference(self.size)._record
     
+    def __str__(self):
+        return str(self._record)
+    
+    def getAllRecords(self):
+        return str(self._record)
+    
     def parse(self, buffer: BytesIO):
         self._record = buffer.read(self.getSize())
 
@@ -201,12 +229,10 @@ class ReferenceSizeParser(Parser):
         if value is not None:
             self._record = value
         if self._parent is not None:
-            dummy_stream = BytesIO()
-            self.unparse(dummy_stream)
-            new_size = dummy_stream.tell()
-            del dummy_stream
-            size_parser = self._parent.getReference(self.size)
-            size_parser._record = new_size
+            if self.size is not None:
+                new_size = self._getInternalSize()
+                size_parser = self._parent.getReference(self.size)
+                size_parser._record = new_size
             self._parent.updateRecord()
         
 class StringParser(ReferenceSizeParser):
@@ -218,6 +244,15 @@ class StringParser(ReferenceSizeParser):
     
     def unparse(self, buffer: BytesIO):
         buffer.write(self._record.encode('utf-8'))
+
+    def _getInternalSize(self):
+        return len(self._record.encode('utf-8'))
+    
+    def __str__(self):
+        return str(self._record)
+    
+    def getAllRecords(self):
+        return str(self._record)
 
 class ImageParser(ReferenceSizeParser):
     """Class for parsing reference-sized image data"""
@@ -243,6 +278,12 @@ class ImageParser(ReferenceSizeParser):
         width, height, depth = self._getDims()
         numColors = self._getNumColors()
         return width*height*depth*numColors
+    
+    def __str__(self):
+        return str(self._record)
+    
+    def getAllRecords(self):
+        return str(self._record)
 
     def _getMode(self):
         """Get Pillow mode"""
@@ -279,7 +320,7 @@ class BlockParser(ReferenceSizeParser):
 
     def __init__(self, id: str, elements: List[Union[FixedSizeParser, ReferenceSizeParser]], size=None):
         super().__init__(id, size)
-        self._record = OrderedDict()
+        self._record: Dict[str, Parser] = OrderedDict()
         for element in elements:
             self._record[element.getID()] = element
             element._parent = self
@@ -300,32 +341,84 @@ class BlockParser(ReferenceSizeParser):
         record = {id: parser.getAllRecords() for id, parser in self._record.items()}
         return record
 
+    def _getInternalSize(self):
+        total = 0
+        for parser in self.values():
+            total += parser._getInternalSize()
+        return total
+    
+    def __contains__(self, key):
+        return key in self._record
+    
+    def keys(self):
+        return self._record.keys()
+    
+    def values(self):
+        return self._record.values()
+    
+    def items(self):
+        return self._record.items()
+    
+    def __iter__(self):
+        return iter(self._record)
+
     def __str__(self):
         return json.dumps(self.getAllRecords())
+    
+    def __len__(self):
+        return len(self._record)
+    
+    def __getitem__(self, keys):
+        if keys is None:
+            raise ValueError('expected at least one key')
+        if isinstance(keys, tuple):
+            keys = list(keys)
+        return self.getReference(keys)._record
+        
+    def __setitem__(self, key, value):
+        if isinstance(key, tuple):
+            key = list(key)
+        self.getReference(key).updateRecord(value)
+        try:
+            self.getReference(key).updateRecord(value)
+        except KeyError:
+            raise KeyError(f'{self.getID()} has no record with key {key}. Maybe you meant to use BlockParser.appendParser()')
+
+    def __delitem__(self, key):
+        del self._record[key]
+        self.updateRecord()
+
+    def appendParser(self, parser: Parser):
+        id = parser.getID()
+        assert id not in self
+        self._record[parser.getID()] = parser
 
     def parse(self, buffer: BytesIO):
         size = self.getSize()
         if size is None:
-            for id, element in self._record.items():
+            for id, element in self.items():
                 element.parse(buffer)
         else:
             data = buffer.read(size)
             tempbuf = BytesIO(data)
-            for id, element in self._record.items():
+            for id, element in self.items():
                 element.parse(tempbuf)
+            remainder = tempbuf.read()
+            if len(remainder) > 0:
+                self.appendParser(ReferenceSizeParser('_remainder', None))
+                self._record['_remainder'].parse(BytesIO(remainder))
         # TODO change to avoid copy (use difference refs?)
         #  goal is to get rid of the reference size chunk parser
-        # TODO this breaks transformation parsers
     
     def unparse(self, buffer: BytesIO):
-        for id, element in self._record.items():
+        for id, element in self.items():
             element.unparse(buffer)
     
 class ReferenceCountParser(Parser):
 
     def __init__(self, id: str, count_id: Reference, element_factory: Callable[[int], Parser]):
         super().__init__(id)
-        self._record = []
+        self._record: List[Parser] = []
         self.count_id = count_id
         self.element_factory = element_factory
         self._count = -1
@@ -346,8 +439,26 @@ class ReferenceCountParser(Parser):
         return records
     
     def __str__(self):
-        l = self.getAllRecords
+        l = self.getAllRecords()
         return json.dumps(l)
+    
+    def __len__(self):
+        return self._count
+    
+    def __iter__(self):
+        return iter(self._record)
+    
+    def __getitem__(self, idx: int):
+        if isinstance(idx, tuple):
+            idx = list(idx)
+        return self.getReference(idx)
+    
+    def __setitem__(self, ref, value):
+        self.getReference(ref).updateRecord(value)  
+
+    def __delitem__(self, idx):
+        del self._record[idx]
+        self._updateCount()
 
     def parse(self, buffer: BytesIO):
         self._count = self._parent.getReference(self.count_id)._record
@@ -369,12 +480,26 @@ class ReferenceCountParser(Parser):
         count_parser._count = count
         self._updateParent()
 
-    def appendRecord(self, new_value):
+    def append(self, new_value):
         new_parser = self.element_factory(len(self._record))
         new_parser._record = new_value
         self._record.append(new_parser)
         self._updateCount()
-        self._updateParent()
+
+    def insert(self, idx, value):
+        initial_count = self.getCount
+        new_parser = self.element_factory(idx)
+        new_parser.updateRecord(value)
+        self._record.insert(idx, new_parser)
+        for i in range(idx+1, initial_count+1):
+            self._record[i].id = i
+        self._updateCount()
+
+    def mapReference(self, reference: Reference, get_record: bool = False):
+        if get_record:
+            return [p.getReference(reference)._record for p in self]
+        else:
+            return [p.getReference(reference) for p in self]
     
 class TransformationParser(BlockParser):
 
@@ -510,6 +635,12 @@ class EOFParser(Parser):
     
     def unparse(self, buffer: BytesIO):
         pass
+
+    def getAllRecords(self):
+        return self._record
+
+    def __str__(self):
+        return str(self._record)
     
 class HexParser(ReferenceSizeParser):
 

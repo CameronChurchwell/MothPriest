@@ -18,17 +18,17 @@ class Reference(ABC):
         raise NotImplementedError()
 
     @classmethod
-    def fromOther(cls, alias):
-        if isinstance(alias, Reference):
-            return alias
-        if isinstance(alias, str):
-            return IDReference(alias)
-        elif isinstance(alias, int):
-            return ConstIntegerReference(alias)
-        elif isinstance(alias, list):
-            return IDListReference([IDReference(s) for s in alias])
+    def fromOther(cls, ref):
+        if isinstance(ref, Reference):
+            return ref
+        if isinstance(ref, str):
+            return IDReference(ref)
+        elif isinstance(ref, int):
+            return ConstIntegerReference(ref)
+        elif isinstance(ref, list) or isinstance(ref, tuple):
+            return IDListReference([IDReference(s) for s in ref])
         else:
-            raise ValueError(f'Unknown alias {alias}')
+            raise ValueError(f'Unknown alias {ref}')
 
 class IDReference(Reference):
     """Class implementing ID references as strings for single level lookup"""

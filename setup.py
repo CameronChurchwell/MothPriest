@@ -9,7 +9,7 @@ setup(
     install_requires=[
         'pathlib',
         'typing',
-        'PIL'
+        'Pillow'
     ],
     packages=['mothpriest'],
 )
