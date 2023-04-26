@@ -63,11 +63,10 @@ class Parser(ABC):
 
     def _getInternalSize(self):
         """get the size currently store in self._record, which may not be the same value as self.getSize()"""
-        dummy_stream = BytesIO()
-        self.unparse(dummy_stream)
-        new_size = dummy_stream.tell()
-        del dummy_stream
-        return new_size
+        with BytesIO() as dummy_stream:
+            self.unparse(dummy_stream)
+            new_size = dummy_stream.tell()
+            return new_size
 
 class FixedSizeParser(Parser):
     """Abstract subclass for parsing a fixed number of bytes"""
@@ -234,6 +233,22 @@ class ReferenceSizeParser(Parser):
                 size_parser = self._parent.getReference(self.size)
                 size_parser._record = new_size
             self._parent.updateRecord()
+
+class ReferencePositionParser(Parser):
+
+    def __init__(self, id: str, position: extendedReference):
+        super().__init__(id)
+        self.position = position
+
+    def parse(self, buffer: BytesIO):
+        self._record = buffer.tell()
+
+    def unparse(self, buffer: BytesIO):
+        if not self._record == buffer.tell():
+            raise ValueError(f'expected position {id} to be at {self._record} but instead it is at {buffer.tell()}')
+        
+    def getSize():
+        return 0
         
 class StringParser(ReferenceSizeParser):
     """Class for parsing reference-sized strings"""
@@ -400,13 +415,14 @@ class BlockParser(ReferenceSizeParser):
                 element.parse(buffer)
         else:
             data = buffer.read(size)
-            tempbuf = BytesIO(data)
-            for id, element in self.items():
-                element.parse(tempbuf)
-            remainder = tempbuf.read()
-            if len(remainder) > 0:
-                self.appendParser(ReferenceSizeParser('_remainder', None))
-                self._record['_remainder'].parse(BytesIO(remainder))
+            with BytesIO(data) as tempbuf:
+                for id, element in self.items():
+                    element.parse(tempbuf)
+                remainder = tempbuf.read()
+                if len(remainder) > 0:
+                    self.appendParser(ReferenceSizeParser('_remainder', None))
+                    with BytesIO(remainder) as remainder_buffer:
+                        self._record['_remainder'].parse(remainder_buffer)
         # TODO change to avoid copy (use difference refs?)
         #  goal is to get rid of the reference size chunk parser
     
@@ -511,16 +527,16 @@ class TransformationParser(BlockParser):
     def parse(self, buffer: BytesIO):
         size = self.getSize()
         data = buffer.read(size)
-        transformedBuffer = BytesIO(self.transform(data))
-        self.size = None #prevent BlockParser.parse() from reading too few bytes
-        super().parse(transformedBuffer)
-        self.size = size
+        with BytesIO(self.transform(data)) as transformed_buffer:
+            self.size = None #prevent BlockParser.parse() from reading too few bytes
+            super().parse(transformed_buffer)
+            self.size = size
     
     def unparse(self, buffer: BytesIO):
-        tempbuf = BytesIO()
-        super().unparse(tempbuf)
-        tempbuf.seek(0)
-        buffer.write(self.transformInverse(tempbuf.read()))
+        with BytesIO() as tempbuf:
+            super().unparse(tempbuf)
+            tempbuf.seek(0)
+            buffer.write(self.transformInverse(tempbuf.read()))
 
 class BytesExpansionParser(TransformationParser):
     """Class for expanding bytes to bits. Every byte gets expanded to 8 bytes each containing either x00 or x01.
