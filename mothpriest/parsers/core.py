@@ -1,4 +1,3 @@
-from abc import ABC, abstractmethod
 import struct
 from collections import OrderedDict
 from typing import Union, List, Callable, Dict
@@ -8,36 +7,38 @@ from PIL import Image
 import json
 from ..references import *
 
-class Parser(ABC):
+class Parser():
     """Abstract base class for parser objects"""
 
-    def __init__(self, id: str):
+    def __init__(self, id: str, size: extendedReference = None):
         self.id = id
+        self.size = size
         self._parent: Parser = None
         self._record = None
-        self._size = None
 
     def getID(self):
         """Returns the id of this element"""
         return self.id
 
-    @abstractmethod
-    def parse(self, buffer: BytesIO):
-        """Parse input bytes"""
-        pass
-
-    @abstractmethod
-    def unparse(self, buffer: BytesIO):
-        """Unparse record back into bytes"""
-        pass
-
-    @abstractmethod
     def getSize(self):
-        """get size of this element"""
-        pass
+        """Retrieve a size from the record for already-parsed input"""
+        if self.size is None:
+            if self._record is None:
+                return None
+            else:
+                return len(self._record)
+        elif self._parent is None:
+            return self.getReference(self.size)._record
+        return self._parent.getReference(self.size)._record
+    
+    def parse(self, buffer: BytesIO):
+        self._record = buffer.read(self.getSize())
+
+    def unparse(self, buffer: BytesIO):
+        buffer.write(self._record)
 
     def getAllRecords(self):
-        return self
+        return str(self._record)
 
     def __str__(self):
         """get a string representation of the record stored in this parser"""
@@ -56,10 +57,15 @@ class Parser(ABC):
             self._parent.updateRecord()
 
     def updateRecord(self, value=None):
-        """Update the record stored in this parser with a new value"""
+        """update the value stored in this record as well as the corresponding size record"""
         if value is not None:
             self._record = value
-        self._updateParent()
+        if self._parent is not None:
+            if self.size is not None:
+                new_size = self._getInternalSize()
+                size_parser = self._parent.getReference(self.size)
+                size_parser._record = new_size
+            self._parent.updateRecord()
 
     def _getInternalSize(self):
         """get the size currently store in self._record, which may not be the same value as self.getSize()"""
@@ -68,35 +74,11 @@ class Parser(ABC):
             new_size = dummy_stream.tell()
             return new_size
 
-class FixedSizeParser(Parser):
-    """Abstract subclass for parsing a fixed number of bytes"""
-
-    def __init__(self, id: str, size: int):
-        """Basic initializer"""
-        super().__init__(id)
-        self.size = size
-
-    def getSize(self):
-        """Get the constant, fixed size of this element"""
-        return self.size
-    
-    def updateRecord(self, value=None):
-        if value is not None:
-            new_size = len(value)
-            if new_size != self.size:
-                raise ValueError(f'new size {new_size} does not match fixed size {self.size} for parser {self.id}')
-        self._updateParent()
-
-    def _getInternalSize(self):
-        return self.size
-
-class MagicParser(FixedSizeParser):
+class MagicParser(Parser):
     """Class for parsing magic strings, which usually exist at the beginning of a file to hint at its file type"""
 
     def __init__(self, value: Union[str, bytes], id: str):
         """pass a size, the expected magic value, and an id"""
-        size = len(value)
-        super().__init__(id, size)
         if isinstance(value, bytes):
             value = value
         elif isinstance(value, str):
@@ -115,9 +97,6 @@ class MagicParser(FixedSizeParser):
 
     def unparse(self, buffer: BytesIO):
         buffer.write(self._record)
-
-    def __str__(self):
-        return str(self._record)
     
     def getAllRecords(self):
         return str(self._record)
@@ -125,17 +104,17 @@ class MagicParser(FixedSizeParser):
     def updateRecord(self, value=None):
         raise NotImplementedError('Cannot update magic record, operation is not permitted')
 
-class StructValueParser(FixedSizeParser):
+class StructValueParser(Parser):
     """Class for parsing a packed value using struct.unpack"""
     
     def __init__(self, size: extendedReference, format_string: str, id: str):
         """Pass a size, a format string for the struct.unpack method, and an id"""
-        super().__init__(id, self.getReference(size)._record)
+        super().__init__(id, size)
         self.format_string = format_string
 
     def parse(self, buffer: BytesIO):
         """returns a list of unpacked values"""
-        data = buffer.read(self.size)
+        data = buffer.read(self.getSize())
         self._record = struct.unpack(self.format_string, data)
     
     def unparse(self, buffer: BytesIO):
@@ -149,9 +128,9 @@ class StructValueParser(FixedSizeParser):
         if value is not None:
             try:
                 packed = struct.pack(self.format_string, value)
-                assert len(packed) == self.size
+                assert len(packed) == self.getSize()
             except:
-                raise ValueError(f'could not pack value {value} into size {self.size} for parser {self.id}')
+                raise ValueError(f'could not pack value {value} into size {self.getSize()} for parser {self.id}')
         self._updateParent()
 
 class IntegerParser(StructValueParser):
@@ -191,69 +170,8 @@ class IntegerParser(StructValueParser):
         except:
             raise ValueError(f'failed to parse integer, got {values}')
         self._record = values[0]
-
-class ReferenceSizeParser(Parser):
-    """Subclass for parsing a variable number of bytes given by a reference"""
-
-    def __init__(self, id: str, size: extendedReference):
-        super().__init__(id)
-        self.size = size
-        self._size = None
-
-    def getSize(self):
-        """Retrieve a size from the record for already-parsed input"""
-        if self.size is None:
-            if self._record is None:
-                return None
-            else:
-                return len(self._record)
-        elif self._parent is None:
-            return self.getReference(self.size)._record
-        return self._parent.getReference(self.size)._record
-    
-    def __str__(self):
-        return str(self._record)
-    
-    def getAllRecords(self):
-        return str(self._record)
-    
-    def parse(self, buffer: BytesIO):
-        self._record = buffer.read(self.getSize())
-
-    def unparse(self, buffer: BytesIO):
-        buffer.write(self._record)
-    
-    def updateRecord(self, value=None):
-        """update the value stored in this record as well as the corresponding size record"""
-        if value is not None:
-            self._record = value
-        if self._parent is not None:
-            if self.size is not None:
-                new_size = self._getInternalSize()
-                size_parser = self._parent.getReference(self.size)
-                size_parser._record = new_size
-            self._parent.updateRecord()
-
-class ReferencePositionParser(Parser):
-
-    def __init__(self, id: str, position: extendedReference, enforce: bool = False):
-        super().__init__(id)
-        self.position = position
-        self.enforce = enforce
-
-    def parse(self, buffer: BytesIO):
-        self._record = buffer.tell()
-        print(self.id, self._record)
-
-    def unparse(self, buffer: BytesIO):
-        if self.enforce:
-            if not self._record == buffer.tell():
-                raise ValueError(f'expected position {id} to be at {self._record} but instead it is at {buffer.tell()}')
         
-    def getSize(self):
-        return 0
-        
-class StringParser(ReferenceSizeParser):
+class StringParser(Parser):
     """Class for parsing reference-sized strings"""
 
     def parse(self, buffer: BytesIO):
@@ -272,12 +190,12 @@ class StringParser(ReferenceSizeParser):
     def getAllRecords(self):
         return str(self._record)
 
-class ImageParser(ReferenceSizeParser):
+class ImageParser(Parser):
     """Class for parsing reference-sized image data"""
 
-    def __init__(self, width: extendedReference, height: extendedReference, id: str, depth: extendedReference = 1, numColors: extendedReference = 4):
+    def __init__(self, id: str, width: extendedReference, height: extendedReference, depth: extendedReference = 1, numColors: extendedReference = 4):
         """Create an image parser where depth is given in bytes and numColors is an integer referring to RGB vs RGBA, etc."""
-        super().__init__(id, None)
+        super().__init__(id)
         self.width = width
         self.height = height
         self.depth = depth
@@ -333,10 +251,10 @@ class ImageParser(ReferenceSizeParser):
     def updateRecord(self, value: Image):
         raise NotImplementedError('no updating yet for image records')
 
-class BlockParser(ReferenceSizeParser):
+class BlockParser(Parser):
     """Class for parsing a block of parsable elements"""
 
-    def __init__(self, id: str, elements: List[Union[FixedSizeParser, ReferenceSizeParser]], size=None):
+    def __init__(self, id: str, elements: List[Parser], size=None):
         super().__init__(id, size)
         self._record: Dict[str, Parser] = OrderedDict()
         for element in elements:
@@ -423,7 +341,7 @@ class BlockParser(ReferenceSizeParser):
                     element.parse(tempbuf)
                 remainder = tempbuf.read()
                 if len(remainder) > 0:
-                    self.appendParser(ReferenceSizeParser('_remainder', None))
+                    self.appendParser(Parser('_remainder', None))
                     with BytesIO(remainder) as remainder_buffer:
                         self._record['_remainder'].parse(remainder_buffer)
         # TODO change to avoid copy (use difference refs?)
@@ -547,7 +465,6 @@ class TransformationParser(BlockParser):
             super().parse(buffer)
             self.size = size
 
-    
     def unparse(self, buffer: BytesIO):
         with BytesIO() as tempbuf:
             super().unparse(tempbuf)
@@ -585,7 +502,7 @@ class BytesExpansionParser(TransformationParser):
             result += struct.pack('B', int(bits[i*8:i*8+8], 2))
         return result
 
-    def __init__(self, id: str, size: int, bit_sizes: List[int], parser: FixedSizeParser):
+    def __init__(self, id: str, size: int, bit_sizes: List[int], parser: Parser):
         """Note that size here indicates the size in bytes, not bits"""
         if size != sum(bit_sizes) / 8:
             raise ValueError('Number of bits must add up to 1/8th the number of bytes')
@@ -593,15 +510,16 @@ class BytesExpansionParser(TransformationParser):
 
 class PDBParser(Parser):
 
-    def getSize(self):
-        return None
+    def __init__(self):
+        super().__init__('pdb')
     
     def parse(self, buffer: BytesIO):
         import pdb; pdb.set_trace()
         pass
 
     def unparse(self, buffer: BytesIO):
-        raise NotImplementedError('unparsing not implemented for debug parsers')
+        import pdb; pdb.set_trace()
+        pass
     
 class ReferenceMappedParser(Parser):
 
@@ -680,6 +598,7 @@ class EOFParser(Parser):
             raise ValueError(f'Expected eof but found {len(remainder)} bytes instead')
     
     def unparse(self, buffer: BytesIO):
+        # TODO find a way to enforce
         pass
 
     def getAllRecords(self):
@@ -688,7 +607,7 @@ class EOFParser(Parser):
     def __str__(self):
         return str(self._record)
     
-class HexParser(ReferenceSizeParser):
+class HexParser(Parser):
 
     def __init__(self, id: str, size: extendedReference = None, little_endian=True):
         super().__init__(id, size)
@@ -707,7 +626,7 @@ class HexParser(ReferenceSizeParser):
             hex_bytes = bytes(reversed(hex_bytes))
         buffer.write(hex_bytes)
 
-class NoneParser(FixedSizeParser):
+class NoneParser(Parser):
     """A parser which does absolutely nothing"""
     def __init__(self, id: str):
         super().__init__(id, 0)
