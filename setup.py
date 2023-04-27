@@ -2,7 +2,7 @@ from distutils.core import setup
 
 setup(
     name='MothPriest',
-    version='0.3',
+    version='0.4',
     description='Module for creating intuitive and efficient file parsers',
     author='Cameron Churchwell',
     author_email='cameronchurchwell2024@u.northwestern.edu',

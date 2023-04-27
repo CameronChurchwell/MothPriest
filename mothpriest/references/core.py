@@ -54,8 +54,6 @@ class IDListReference(Reference):
     def retrieveRecord(self, parser: Union[BlockParser, ReferenceCountParser]):
         p = parser
         for ref in self.references:
-            if not isinstance(p, (parsers.BlockParser, parsers.ReferenceCountParser)):
-                raise ValueError(f'cannot unpack IDListReference for parser type {p.__class__}')
             try:
                 p = p.getReference(ref)
             except (KeyError, IndexError):

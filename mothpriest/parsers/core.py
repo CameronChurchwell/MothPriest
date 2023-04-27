@@ -13,7 +13,7 @@ class Parser(ABC):
 
     def __init__(self, id: str):
         self.id = id
-        self._parent = None
+        self._parent: Parser = None
         self._record = None
         self._size = None
 
@@ -236,18 +236,21 @@ class ReferenceSizeParser(Parser):
 
 class ReferencePositionParser(Parser):
 
-    def __init__(self, id: str, position: extendedReference):
+    def __init__(self, id: str, position: extendedReference, enforce: bool = False):
         super().__init__(id)
         self.position = position
+        self.enforce = enforce
 
     def parse(self, buffer: BytesIO):
         self._record = buffer.tell()
+        print(self.id, self._record)
 
     def unparse(self, buffer: BytesIO):
-        if not self._record == buffer.tell():
-            raise ValueError(f'expected position {id} to be at {self._record} but instead it is at {buffer.tell()}')
+        if self.enforce:
+            if not self._record == buffer.tell():
+                raise ValueError(f'expected position {id} to be at {self._record} but instead it is at {buffer.tell()}')
         
-    def getSize():
+    def getSize(self):
         return 0
         
 class StringParser(ReferenceSizeParser):
@@ -519,18 +522,31 @@ class ReferenceCountParser(Parser):
     
 class TransformationParser(BlockParser):
 
-    def __init__(self, id: str, size: extendedReference, transform, transformInverse, elements: List[Parser]):
+    def __init__(self, id: str, size: extendedReference, transform, transformInverse, elements: List[Parser], in_place=False):
         super().__init__(id, elements, size)
         self.transform = transform
         self.transformInverse = transformInverse
+        self.in_place = in_place
 
     def parse(self, buffer: BytesIO):
         size = self.getSize()
+        start_position = buffer.tell()
         data = buffer.read(size)
-        with BytesIO(self.transform(data)) as transformed_buffer:
+        if not self.in_place:
+            with BytesIO(self.transform(data)) as transformed_buffer:
+                self.size = None #prevent BlockParser.parse() from reading too few bytes
+                super().parse(transformed_buffer)
+                self.size = size
+        else: # in place
+            remainder = buffer.read()
+            buffer.seek(start_position)
+            buffer.write(self.transform(data))
+            buffer.write(remainder)
+            buffer.seek(start_position)
             self.size = None #prevent BlockParser.parse() from reading too few bytes
-            super().parse(transformed_buffer)
+            super().parse(buffer)
             self.size = size
+
     
     def unparse(self, buffer: BytesIO):
         with BytesIO() as tempbuf:
@@ -593,7 +609,7 @@ class ReferenceMappedParser(Parser):
         super().__init__(id)
         self.key_id = key_id
         self.mapping = mapping
-        self._active = None
+        self._active: Parser = None
 
     def _getParser(self):
         key = self._parent.getReference(self.key_id)._record
@@ -605,6 +621,14 @@ class ReferenceMappedParser(Parser):
             return True
         except KeyError:
             raise KeyError(f'ReferenceMappedParser read an unexpected key: {key}')
+        
+    def switchActive(self, key):
+        if key not in self.mapping:
+            raise KeyError(f'key {key} not in mapping')
+        self._parent.getReference(self.key_id)._record = key
+        self._getParser()
+        self._record = self._active._record
+        self._updateParent()
 
     def getSize(self):
         if not self._getParser():
@@ -632,8 +656,14 @@ class ReferenceMappedParser(Parser):
     def unparse(self, buffer: BytesIO):
         if not self._getParser():
             raise KeyError('ReferenceMappedParser read a None record for key value')
-        self._active._record = self._record
+        # self._active._record = self._record
         self._active.unparse(buffer)
+
+    def getReference(self, reference: extendedReference):
+        if not self._getParser():
+            raise KeyError('ReferenceMappedParser read a None record for key value')
+        self._active._record = self._record
+        return self._active.getReference(reference)
     
 class EOFParser(Parser):
 
@@ -676,3 +706,64 @@ class HexParser(ReferenceSizeParser):
         if self.little_endian:
             hex_bytes = bytes(reversed(hex_bytes))
         buffer.write(hex_bytes)
+
+class NoneParser(FixedSizeParser):
+    """A parser which does absolutely nothing"""
+    def __init__(self, id: str):
+        super().__init__(id, 0)
+
+    def parse(self, buffer: BytesIO):
+        return
+    
+    def unparse(self, buffer: BytesIO):
+        return
+
+class ErrorParser(Parser):
+    """A parser which raises an error on parse or unparse"""
+
+    def __init__(self, id: str, error: Exception):
+        super().__init__(id)
+        self.error = error
+
+    def parse(self, buffer: BytesIO):
+        raise self.error
+
+    def unparse(self, buffer: BytesIO):
+        raise self.error
+
+    def getSize(self):
+        return 0
+    
+class SourceDeletingParser(BlockParser):
+    """A parser which removes its source from the buffer after parsing. Otherwise it behaves like a BlockParser"""
+
+    def parse(self, buffer:BytesIO):
+        start = buffer.tell()
+        super().parse(buffer)
+        remainder = buffer.read()
+        buffer.seek(start)
+        buffer.write(remainder)
+        buffer.truncate()
+        buffer.seek(start)
+
+class SwitchParser(Parser):
+    """A parser which switches a ReferenceMappedParser to a different branch on parse"""
+
+    def __init__(self, id: str, mapped_parser_id: extendedReference, parse_key, unparse_key):
+        super().__init__(id)
+        self.mapped_parser_id = mapped_parser_id
+        self.parse_key = parse_key
+        self.unparse_key = unparse_key
+
+    def parse(self, buffer: BytesIO):
+        parser = self._parent.getReference(self.mapped_parser_id)
+        assert isinstance(parser, ReferenceMappedParser)
+        parser.switchActive(self.parse_key)
+
+    def unparse(self, buffer: BytesIO):
+        parser = self._parent.getReference(self.mapped_parser_id)
+        assert isinstance(parser, ReferenceMappedParser)
+        parser.switchActive(self.unparse_key)
+
+    def getSize(self):
+        return 0
