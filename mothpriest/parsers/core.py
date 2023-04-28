@@ -10,15 +10,27 @@ from ..references import *
 class Parser():
     """Abstract base class for parser objects"""
 
-    def __init__(self, id: str, size: extendedReference = None):
+    def __init__(self, id: str, size: extendedReference = None, position: extendedReference = None):
         self.id = id
         self.size = size
+        self.position = position
         self._parent: Parser = None
         self._record = None
 
     def getID(self):
         """Returns the id of this element"""
         return self.id
+
+    def getPosition(self):
+        if self.position is None:
+            raise ValueError
+        
+    def _updatePositions(self):
+        if self._parent is None:
+            self._position = 0
+        else:
+            pass
+        self._parent.updateReference(self.position, self._position)
 
     def getSize(self):
         """Retrieve a size from the record for already-parsed input"""
@@ -56,18 +68,31 @@ class Parser():
         if self._parent is not None:
             self._parent.updateRecord()
 
+    def updateReference(self, reference: extendedReference, value):
+        parser = self.getReference(reference)
+        parser.updateRecord(value)
+        parser._updateParent()
+
+    def _updateSize(self, new_size=None):
+        if self.size is None:
+            return
+        if new_size is None:
+            new_size = self._getRecordSize()
+            size = self._parent.getReference(self.size)
+            if isinstance(size, Parser):
+                size.updateRecord(new_size)
+            elif isinstance(size, ConstIntegerReference):
+                size._record = new_size
+
     def updateRecord(self, value=None):
         """update the value stored in this record as well as the corresponding size record"""
         if value is not None:
             self._record = value
         if self._parent is not None:
-            if self.size is not None:
-                new_size = self._getInternalSize()
-                size_parser = self._parent.getReference(self.size)
-                size_parser._record = new_size
+            self._updateSize()
             self._parent.updateRecord()
 
-    def _getInternalSize(self):
+    def _getRecordSize(self):
         """get the size currently store in self._record, which may not be the same value as self.getSize()"""
         with BytesIO() as dummy_stream:
             self.unparse(dummy_stream)
@@ -181,7 +206,7 @@ class StringParser(Parser):
     def unparse(self, buffer: BytesIO):
         buffer.write(self._record.encode('utf-8'))
 
-    def _getInternalSize(self):
+    def _getRecordSize(self):
         return len(self._record.encode('utf-8'))
     
     def __str__(self):
@@ -277,10 +302,10 @@ class BlockParser(Parser):
         record = {id: parser.getAllRecords() for id, parser in self._record.items()}
         return record
 
-    def _getInternalSize(self):
+    def _getRecordSize(self):
         total = 0
         for parser in self.values():
-            total += parser._getInternalSize()
+            total += parser._getRecordSize()
         return total
     
     def __contains__(self, key):
@@ -664,25 +689,3 @@ class SourceDeletingParser(BlockParser):
         buffer.write(remainder)
         buffer.truncate()
         buffer.seek(start)
-
-class SwitchParser(Parser):
-    """A parser which switches a ReferenceMappedParser to a different branch on parse"""
-
-    def __init__(self, id: str, mapped_parser_id: extendedReference, parse_key, unparse_key):
-        super().__init__(id)
-        self.mapped_parser_id = mapped_parser_id
-        self.parse_key = parse_key
-        self.unparse_key = unparse_key
-
-    def parse(self, buffer: BytesIO):
-        parser = self._parent.getReference(self.mapped_parser_id)
-        assert isinstance(parser, ReferenceMappedParser)
-        parser.switchActive(self.parse_key)
-
-    def unparse(self, buffer: BytesIO):
-        parser = self._parent.getReference(self.mapped_parser_id)
-        assert isinstance(parser, ReferenceMappedParser)
-        parser.switchActive(self.unparse_key)
-
-    def getSize(self):
-        return 0
