@@ -9,7 +9,8 @@ setup(
     install_requires=[
         'pathlib',
         'typing',
-        'Pillow'
+        'Pillow',
+        'pytest'
     ],
     packages=['mothpriest'],
 )

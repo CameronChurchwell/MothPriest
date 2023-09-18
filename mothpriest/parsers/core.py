@@ -1,11 +1,21 @@
 import struct
 from collections import OrderedDict
+import warnings
 from typing import Union, List, Callable, Dict
 from functools import partial
 from io import BytesIO
 from PIL import Image
 import json
 from ..references import *
+
+VERBOSE = False
+
+# def changingOP(method):
+#     def wrapper(instance: Parser, *args, **kwargs):
+#         value = method(instance, *args, **kwargs)
+#         instance._changed = True
+#         return value
+#     return wrapper
 
 class Parser():
     """Abstract base class for parser objects"""
@@ -16,21 +26,25 @@ class Parser():
         self.position = position
         self._parent: Parser = None
         self._record = None
+        self._cache = {}
+        self._changed = False
 
     def getID(self):
         """Returns the id of this element"""
         return self.id
+    
+    def _clearCache(self):
+        self._cache = {}
 
     def getPosition(self):
         if self.position is None:
             raise ValueError
-        
-    def _updatePositions(self):
+
+    def _getRoot(self):
         if self._parent is None:
-            self._position = 0
+            return self
         else:
-            pass
-        self._parent.updateReference(self.position, self._position)
+            return self._parent._getRoot()
 
     def getSize(self):
         """Retrieve a size from the record for already-parsed input"""
@@ -43,8 +57,14 @@ class Parser():
             return self.getReference(self.size)._record
         return self._parent.getReference(self.size)._record
     
+    def _setRecord(self, value):
+        if value != self._record:
+            self._record = value
+            self._clearCache()
+            self._changed = True
+    
     def parse(self, buffer: BytesIO):
-        self._record = buffer.read(self.getSize())
+        self._setRecord(buffer.read(self.getSize()))
 
     def unparse(self, buffer: BytesIO):
         buffer.write(self._record)
@@ -60,7 +80,8 @@ class Parser():
         self.parse(buffer)
 
     def getReference(self, reference: Union[Reference, str, int, List[str]]):
-        """allows the use of strings and lists of strings in place of the corresponding Reference subclasses"""
+        """allows the use of strings and lists of strings in place of the corresponding Reference subclasses
+        Return value indicates if anything was changed or not"""
         ref = Reference.fromOther(reference)
         return ref.retrieveRecord(self)
     
@@ -68,36 +89,48 @@ class Parser():
         if self._parent is not None:
             self._parent.updateRecord()
 
-    def updateReference(self, reference: extendedReference, value):
+    def updateReference(self, reference: extendedReference, value) -> bool:
         parser = self.getReference(reference)
-        parser.updateRecord(value)
-        parser._updateParent()
+        if isinstance(parser, Parser):
+            return parser.updateRecord(value)
+        else:
+            warnings.warn(f'skipping update of reference {reference}, {reference.__class__}')
+        return False
 
-    def _updateSize(self, new_size=None):
-        if self.size is None:
-            return
-        if new_size is None:
-            new_size = self._getRecordSize()
-            size = self._parent.getReference(self.size)
-            if isinstance(size, Parser):
-                size.updateRecord(new_size)
-            elif isinstance(size, ConstIntegerReference):
-                size._record = new_size
+    def _updateRefs(self, size: int = None, position: int = None):
+        """Update all references for this element. return value indicates if anything was changed"""
+        if VERBOSE:
+            print(f'updating references for {self.getID()} with size {size}, position {position}')
+        if size is None:
+            assert position is None
+            root = self._getRoot()
+            size = root._getRecordSize()
+            root._updateRefs(size, 0)
+        if self._parent is not None:
+            if self.position is not None:
+                self._parent.updateReference(self.position, position)
+            if self.size is not None:
+                self._parent.updateReference(self.size, size)
 
     def updateRecord(self, value=None):
         """update the value stored in this record as well as the corresponding size record"""
+        if VERBOSE:
+            print(f'updating parser {self.getID()} with value {value}')
         if value is not None:
-            self._record = value
-        if self._parent is not None:
-            self._updateSize()
-            self._parent.updateRecord()
+            if value != self._record:
+                self._setRecord(value)
+                self._updateRefs()
 
     def _getRecordSize(self):
         """get the size currently store in self._record, which may not be the same value as self.getSize()"""
-        with BytesIO() as dummy_stream:
-            self.unparse(dummy_stream)
-            new_size = dummy_stream.tell()
-            return new_size
+        if 'size' not in self._cache:
+            with BytesIO() as dummy_stream:
+                self.unparse(dummy_stream)
+                new_size = dummy_stream.tell()
+                self._cache['size'] = new_size
+                return new_size
+        else:
+            return self._cache['size']
 
 class MagicParser(Parser):
     """Class for parsing magic strings, which usually exist at the beginning of a file to hint at its file type"""
@@ -156,7 +189,7 @@ class StructValueParser(Parser):
                 assert len(packed) == self.getSize()
             except:
                 raise ValueError(f'could not pack value {value} into size {self.getSize()} for parser {self.id}')
-        self._updateParent()
+        super().updateRecord(value)
 
 class IntegerParser(StructValueParser):
     """Class for parsing packed integers with a given size"""
@@ -308,27 +341,35 @@ class BlockParser(Parser):
             total += parser._getRecordSize()
         return total
     
+    def _updateRefs(self, size: int = None, position: int = None):
+        super()._updateRefs(size, position)
+        pos = position
+        for k, p in self.items():
+            _size = p._getRecordSize()
+            p._updateRefs(_size, pos)
+            pos += _size
+
     def __contains__(self, key):
         return key in self._record
-    
+
     def keys(self):
         return self._record.keys()
-    
+
     def values(self):
         return self._record.values()
-    
+
     def items(self):
         return self._record.items()
-    
+
     def __iter__(self):
         return iter(self._record)
 
     def __str__(self):
         return json.dumps(self.getAllRecords())
-    
+
     def __len__(self):
         return len(self._record)
-    
+
     def __getitem__(self, keys):
         if keys is None:
             raise ValueError('expected at least one key')
@@ -339,7 +380,6 @@ class BlockParser(Parser):
     def __setitem__(self, key, value):
         if isinstance(key, tuple):
             key = list(key)
-        self.getReference(key).updateRecord(value)
         try:
             self.getReference(key).updateRecord(value)
         except KeyError:
@@ -371,15 +411,15 @@ class BlockParser(Parser):
                         self._record['_remainder'].parse(remainder_buffer)
         # TODO change to avoid copy (use difference refs?)
         #  goal is to get rid of the reference size chunk parser
-    
+
     def unparse(self, buffer: BytesIO):
         for id, element in self.items():
             element.unparse(buffer)
-    
+
 class ReferenceCountParser(Parser):
 
-    def __init__(self, id: str, count_id: Reference, element_factory: Callable[[int], Parser]):
-        super().__init__(id)
+    def __init__(self, id: str, count_id: Reference, element_factory: Callable[[int], Parser], position: extendedReference = None):
+        super().__init__(id, position=position)
         self._record: List[Parser] = []
         self.count_id = count_id
         self.element_factory = element_factory
@@ -395,32 +435,46 @@ class ReferenceCountParser(Parser):
             size = element.getSize()
             total += size
         return total
-    
+
     def getAllRecords(self):
         records = [parser.getAllRecords() for parser in self._record]
         return records
-    
+
     def __str__(self):
         l = self.getAllRecords()
         return json.dumps(l)
-    
+
     def __len__(self):
         return self._count
-    
+
     def __iter__(self):
         return iter(self._record)
-    
+
     def __getitem__(self, idx: int):
         if isinstance(idx, tuple):
             idx = list(idx)
         return self.getReference(idx)
-    
+
     def __setitem__(self, ref, value):
         self.getReference(ref).updateRecord(value)  
 
     def __delitem__(self, idx):
         del self._record[idx]
-        self._updateCount()
+        self.updateRecord()
+
+    def _updateRefs(self, size: int = None, position: int = None):
+        super()._updateRefs(size, position)
+        if size is None:
+            assert position is None
+            return
+        if self._parent is not None:
+            count_parser = self._parent.getReference(self.count_id)
+            count_parser._record = len(self._record)
+        pos = position
+        for p in self:
+            _size = p._getRecordSize()
+            p._updateRefs(_size, pos)
+            pos += _size
 
     def parse(self, buffer: BytesIO):
         self._count = self._parent.getReference(self.count_id)._record
@@ -433,20 +487,11 @@ class ReferenceCountParser(Parser):
         for element in self._record:
             element.unparse(buffer)
 
-    def getCount(self):
-        return len(self._record)
-
-    def _updateCount(self):
-        count = self.getCount()
-        count_parser = self._parent.getReference(self.count_id)
-        count_parser._count = count
-        self._updateParent()
-
     def append(self, new_value):
         new_parser = self.element_factory(len(self._record))
         new_parser._record = new_value
         self._record.append(new_parser)
-        self._updateCount()
+        self._updateRefs()
 
     def insert(self, idx, value):
         initial_count = self.getCount
@@ -455,7 +500,7 @@ class ReferenceCountParser(Parser):
         self._record.insert(idx, new_parser)
         for i in range(idx+1, initial_count+1):
             self._record[i].id = i
-        self._updateCount()
+        self._updateRefs()
 
     def mapReference(self, reference: Reference, get_record: bool = False):
         if get_record:
@@ -564,14 +609,17 @@ class ReferenceMappedParser(Parser):
             return True
         except KeyError:
             raise KeyError(f'ReferenceMappedParser read an unexpected key: {key}')
-        
+
+    def _updateRefs(self, size: int = None, position: int = None):
+        super()._updateRefs(size, position)
+        self._active._updateRefs(size, position)
+
     def switchActive(self, key):
         if key not in self.mapping:
             raise KeyError(f'key {key} not in mapping')
-        self._parent.getReference(self.key_id)._record = key
+        self._parent.updateReference(self.key_id, key)
         self._getParser()
         self._record = self._active._record
-        self._updateParent()
 
     def getSize(self):
         if not self._getParser():
