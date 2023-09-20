@@ -66,6 +66,9 @@ class ConstIntegerReference(Reference):
     def __init__(self, value: int):
         self._record = value
 
+    def getRecord(self):
+        return self._record
+
     def retrieveRecord(self, parser):
         return self
     
@@ -81,6 +84,9 @@ class FunctionReference(Reference):
         values = [ref.retrieveRecord(parser)._record for ref in self.references]
         self._record = self.function(*values)
         return self
+    
+    def getRecord(self):
+        return self._record
 
 class SumReference(FunctionReference):
     """Class implementing references as a sum"""
