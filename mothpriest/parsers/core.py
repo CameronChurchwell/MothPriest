@@ -6,7 +6,9 @@ from functools import partial
 from io import BytesIO
 from PIL import Image
 import json
+import tqdm
 from ..references import *
+from ..buffers import OffsetBuffer
 
 VERBOSE = False
 
@@ -49,12 +51,45 @@ class Parser():
         elif self._parent is not None:
             return self._parent.getPrior()
         else:
-            None
+            return None
+
+    def getSubsequent(self):
+        if self._subsequent is not None:
+            return self._subsequent
+        if self._parent is not None:
+            return self._parent.getSubsequent()
+        else:
+            return None
+
+    def getPath(self):
+        path = [self]
+        prior = self.getPrior()
+        while prior is not None:
+            path.append(prior)
+            prior = prior.getPrior()
+        return list(reversed(path))
+
+    def getOrdering(self):
+        subsequent = self.getRoot()
+        ordering = [subsequent]
+        subsequent = subsequent.getSubsequent()
+        while subsequent is not None:
+            ordering.append(subsequent)
+            subsequent = subsequent.getSubsequent()
+        return ordering
+
+    def getRoot(self):
+        prior = self.getPrior()
+        root = self
+        while prior is not None:
+            root = prior
+            prior = prior.getPrior()
+        return root
 
     def getSize(self):
         if self._record is not None and (isinstance(self._size, int) or self._size is None): # We have an actual record and a constant size
-            return self._getRecordSize()
-        elif isinstance(self._size, int): # We have a fixed value
+            return self._size
+        if isinstance(self._size, int): # We have a fixed value
             return self._size
         elif self._size is None: # No record yet and size unspecified (greedy)
             return None
@@ -85,22 +120,17 @@ class Parser():
 
     def setRecord(self, value):
         if callable(self._record):
-            import pdb; pdb.set_trace()
             raise ValueError('Cannot manually set a record which is referenced elsewhere')
         self._record = value
+        self._setSize(self._getRecordSize())
 
     def getPosition(self):
         prior = self.getPrior()
         if prior is None:
             return 0
         if self._record is not None and (isinstance(self._position, int) or self._position is None): # We have an actual record and a constant position
-            priorSize = self.getPrior().getSize()
-            if priorSize is None:
-                return None
-            priorPosition = self.getPrior().getPosition()
-            if priorPosition is None:
-                return None
-            return priorPosition + priorSize
+            path = self.getPath()[:-1] # get path up to self
+            return sum([parser.getSize() for parser in path])
         elif isinstance(self._position, int): # We have a fixed value but no record yet
             return self._position
         elif self._position is None: # No record yet and position unspecified (ignored)
@@ -120,36 +150,6 @@ class Parser():
     def setPosition(self, value):
         self._position = value
 
-    # def _clearCache(self):
-    #     self._cache = {}
-
-    # def getPosition(self):
-    #     if self.position is None:
-    #         raise ValueError
-
-    # def _getRoot(self):
-    #     if self._parent is None:
-    #         return self
-    #     else:
-    #         return self._parent._getRoot()
-
-    # def getSize(self):
-    #     """Retrieve a size from the record for already-parsed input"""
-    #     if self.size is None:
-    #         if self._record is None:
-    #             return None
-    #         else:
-    #             return len(self._record)
-    #     elif self._parent is None:
-    #         return self.getReference(self.size)._record
-    #     return self._parent.getReference(self.size)._record
-    
-    # def _setRecord(self, value):
-    #     if value != self._record:
-    #         self._record = value
-    #         self._clearCache()
-    #         self._changed = True
-    
     def parse(self, buffer: BytesIO):
         parserPosition = self.getPosition()
         if parserPosition is not None:
@@ -159,12 +159,19 @@ class Parser():
                 raise ValueError(f'parsing has already exceeded the position of parser {self.getID()}. \
                                  Currently at ({position}) and parser is positioned at ({parserPosition})')
             elif parserPosition > position:
+                import pdb; pdb.set_trace()
                 buffer.read(parserPosition - position)
 
         self.setRecord(buffer.read(self.getSize()))
 
-    # def unparse(self, buffer: BytesIO):
-    #     buffer.write(self._record)
+    def unparse(self, buffer: BytesIO):
+        parserPosition = self.getPosition()
+        position = buffer.tell()
+        if parserPosition is None:
+            import pdb; pdb.set_trace()
+        if position != parserPosition:
+            import pdb; pdb.set_trace()
+        buffer.write(self.getRecord())
 
     def getAllRecords(self):
         return str(self.getRecord())
@@ -172,7 +179,7 @@ class Parser():
     def __str__(self):
         """get a string representation of the record stored in this parser"""
         return str(self.getRecord())
-    
+
     def __call__(self, buffer: BytesIO):
         self.parse(buffer)
 
@@ -181,17 +188,6 @@ class Parser():
         Return value indicates if anything was changed or not"""
         ref = Reference.fromOther(reference)
         return ref.retrieveRecord(self)
-
-    # def _getRecordSize(self):
-    #     """get the size currently store in self._record, which may not be the same value as self.getSize()"""
-    #     if 'size' not in self._cache:
-    #         with BytesIO() as dummy_stream:
-    #             self.unparse(dummy_stream)
-    #             new_size = dummy_stream.tell()
-    #             self._cache['size'] = new_size
-    #             return new_size
-    #     else:
-    #         return self._cache['size']
 
 class MagicParser(Parser):
     """Class for parsing magic strings, which usually exist at the beginning of a file to hint at its file type"""
@@ -213,9 +209,6 @@ class MagicParser(Parser):
         data = buffer.read(self.getSize())
         if not data == self._record:
             raise ValueError('Magic did not match expected value. Check your parser and that you passed the correct file')
-
-    def unparse(self, buffer: BytesIO):
-        buffer.write(self._record)
     
     def getAllRecords(self):
         return str(self.getRecord())
@@ -231,6 +224,9 @@ class StructValueParser(Parser):
     def parse(self, buffer: BytesIO):
         """returns a list of unpacked values"""
         super().parse(buffer)
+        if self.getRecord() is None or len(self.getRecord()) == 0:
+            import pdb; pdb.set_trace()
+            self.getRecord()
         self.setRecord(struct.unpack(self.format_string, self.getRecord()))
         # data = buffer.read(self.getSize())
         # self._record = struct.unpack(self.format_string, data)
@@ -239,10 +235,22 @@ class StructValueParser(Parser):
         return self._size
 
     def unparse(self, buffer: BytesIO):
+        # if self.getID() in ['unknownTable3', 'unknownTable3Size', 'unknownTable3Offset']:
+        #     import pdb; pdb.set_trace()
+        parserPosition = self.getPosition()
+        position = buffer.tell()
+        if parserPosition is None:
+            import pdb; pdb.set_trace()
+        if position != parserPosition:
+            import pdb; pdb.set_trace()
         try:
-            packed = struct.pack(self.format_string, *self._record)
-        except TypeError:
-            packed = struct.pack(self.format_string, self._record)
+            try:
+                packed = struct.pack(self.format_string, *self.getRecord())
+            except TypeError:
+                packed = struct.pack(self.format_string, self.getRecord())
+        except:
+            import pdb; pdb.set_trace()
+            self.getRecord()
         buffer.write(packed)
 
 class IntegerParser(StructValueParser):
@@ -291,13 +299,13 @@ class StringParser(Parser):
         self._record = value.decode('utf-8')
     
     def unparse(self, buffer: BytesIO):
-        buffer.write(self._record.encode('utf-8'))
+        buffer.write(self.getRecord().encode('utf-8'))
 
     def _getRecordSize(self):
-        return len(self._record.encode('utf-8'))
+        return len(self.getRecord().encode('utf-8'))
     
     def __str__(self):
-        return str(self._record)
+        return str(self.getRecord())
     
     def getAllRecords(self):
         return str(self.getRecord())
@@ -357,7 +365,7 @@ class ImageParser(Parser):
         self._record = image
 
     def unparse(self, buffer: BytesIO):
-        image_bytes = self._record.tobytes()
+        image_bytes = self.getRecord().tobytes()
         buffer.write(image_bytes)
 
 class BlockParser(Parser):
@@ -369,12 +377,14 @@ class BlockParser(Parser):
         prior = None
         for element in elements:
             element._prior = prior
+            if prior is not None:
+                prior._subsequent = element
             element._parent = self
             self._record[element.getID()] = element
             prior = element
 
     def getSize(self):
-        if self._size is None:
+        if self._size is None: #TODO change this to check for equality
             total = 0
             for id, element in self._record.items():
                 size = element.getSize()
@@ -444,19 +454,22 @@ class BlockParser(Parser):
 
     def parse(self, buffer: BytesIO):
         size = self.getSize()
-        if size is None:
-            for id, element in self.items():
-                element.parse(buffer)
-        else:
-            data = buffer.read(size)
-            with BytesIO(data) as tempbuf:
-                for id, element in self.items():
-                    element.parse(tempbuf)
-                remainder = tempbuf.read()
-                if len(remainder) > 0:
-                    self.appendParser(Parser('_remainder', None))
-                    with BytesIO(remainder) as remainder_buffer:
-                        self._record['_remainder'].parse(remainder_buffer)
+        # if size is not None:
+        #     start = buffer.tell()
+        for id, element in self.items():
+            element.parse(buffer)
+        # if size is not None and buffer.tell() - start != size:
+        #     raise ValueError('parsed too much')
+        # else:
+        #     data = buffer.read(size)
+        #     with BytesIO(data) as tempbuf:
+        #         for id, element in self.items():
+        #             element.parse(tempbuf)
+        #         remainder = tempbuf.read()
+        #         if len(remainder) > 0:
+        #             self.appendParser(Parser('_remainder', None))
+        #             with BytesIO(remainder) as remainder_buffer:
+        #                 self._record['_remainder'].parse(remainder_buffer)
         # TODO change to avoid copy (use difference refs?)
         #  goal is to get rid of the reference size chunk parser
 
@@ -474,15 +487,37 @@ class ReferenceCountParser(Parser):
         self._count = -1
 
     def getSize(self):
-        if self._count < 0:
+        count = self.getCount()
+        if count is None:
             return None
-        if len(self._record) != self._count:
-            raise ValueError(f'length of self._record ({len(self._record)}) must be equal to self._count ({self._count})')
+        if len(self.getRecord()) != count:
+            raise ValueError(f'length of self._record ({len(self.getRecord())}) must be equal to self._count ({self.getCount()})')
         total = 0
-        for element in self._record:
+        for element in self.getRecord():
             size = element.getSize()
             total += size
         return total
+    
+    def _getRecordSize(self):
+        total = 0
+        for element in self.getRecord():
+            size = element._getRecordSize()
+            if size is None:
+                return None
+            total += size
+        return total
+
+    def getCount(self):
+        if self._count == -1: # We don't have a count yet, get from reference
+            countParser = self._parent.getReference(self.count_id)
+            value = countParser.getRecord()
+            if value is None:
+                return None
+            countParser._record = self.getCount
+            self._count = value
+            return self._count
+        self._count = len(self.getRecord())
+        return self._count
 
     def getAllRecords(self):
         records = [parser.getAllRecords() for parser in self.getRecord()]
@@ -493,7 +528,7 @@ class ReferenceCountParser(Parser):
         return json.dumps(l)
 
     def __len__(self):
-        return self._count
+        return self.getCount() #TODO potentially really confusing
 
     def __iter__(self):
         return iter(self._record)
@@ -507,34 +542,37 @@ class ReferenceCountParser(Parser):
         self.getReference(ref).setRecord(value)
 
     def __delitem__(self, idx):
-        del self._record[idx]
+        del self.getRecord()[idx]
 
     def parse(self, buffer: BytesIO):
-        self._count = self._parent.getReference(self.count_id)._record
+        count = self.getCount()
         prior = None
-        for i in range(0, self._count):
-            self._record.append(self.element_factory(i))
-            self._record[i]._parent = self
-            self._record[i]._prior = prior
-            prior = self._record[i]
-            self._record[i].parse(buffer)
+        record = self.getRecord()
+        for i in range(0, count):
+            record.append(self.element_factory(i))
+            record[i]._parent = self
+            record[i]._prior = prior
+            prior = record[i]
+            record[i].parse(buffer)
 
     def unparse(self, buffer: BytesIO):
-        for element in self._record:
+        elements = self.getRecord()
+        iterator = tqdm.tqdm(elements, desc=self.getID(), total=len(elements))
+        for element in iterator:
             element.unparse(buffer)
 
     def append(self, new_value):
-        new_parser = self.element_factory(len(self._record))
-        new_parser._record = new_value
-        self._record.append(new_parser)
+        new_parser = self.element_factory(self.getCount)
+        new_parser.setRecord(new_value)
+        self.getRecord().append(new_parser)
 
     def insert(self, idx, value):
-        initial_count = self.getCount
+        initial_count = self.getCount()
         new_parser = self.element_factory(idx)
         new_parser.setRecord(value)
-        self._record.insert(idx, new_parser)
+        self.getRecord().insert(idx, new_parser)
         for i in range(idx+1, initial_count+1):
-            self._record[i].id = i
+            self.getRecord()[i].id = i
 
     def mapReference(self, reference: Reference, get_record: bool = False):
         if get_record:
@@ -573,10 +611,10 @@ class TransformationParser(BlockParser):
             self.size = size
 
     def unparse(self, buffer: BytesIO):
-        with BytesIO() as tempbuf:
-            super().unparse(tempbuf)
-            tempbuf.seek(0)
-            buffer.write(self.transformInverse(tempbuf.read()))
+        with OffsetBuffer(buffer.tell()) as temp_buf:
+            super().unparse(temp_buf)
+            temp_buf.seek(buffer.tell())
+            buffer.write(self.transformInverse(temp_buf.read()))
 
 class BytesExpansionParser(TransformationParser):
     """Class for expanding bytes to bits. Every byte gets expanded to 8 bytes each containing either x00 or x01.
@@ -622,7 +660,8 @@ class PDBParser(Parser):
 
     def __init__(self):
         super().__init__('pdb')
-    
+        self._record = 'pdb'
+
     def parse(self, buffer: BytesIO):
         import pdb; pdb.set_trace()
         pass
@@ -630,15 +669,22 @@ class PDBParser(Parser):
     def unparse(self, buffer: BytesIO):
         import pdb; pdb.set_trace()
         pass
-    
+
+    def _getRecordSize(self):
+        return 0
+
+    def getSize(self):
+        return 0
+
 class ReferenceMappedParser(Parser):
 
-    def __init__(self, id: str, key_id: Reference, mapping: dict):
+    def __init__(self, id: str, key_id: Reference, mapping: dict, transfer_record=True):
         super().__init__(id)
         self.key_id = key_id
         self.mapping = mapping
         self._active: Parser = None
         self._key = None
+        self._transfer_record = transfer_record
 
     def getKey(self):
         if self._active is None:
@@ -649,58 +695,65 @@ class ReferenceMappedParser(Parser):
             keyParser._record = self.getKey
         return self._key
 
+    def setKey(self, key):
+        import pdb; pdb.set_trace()
+        if key not in self.mapping:
+            raise KeyError(f'key {key} not in mapping')
+        self._key = key
+        self._getParser()
+
     def _getParser(self):
         key = self.getKey()
         if key is None:
             return False
         try:
+            if self._active is not None:
+                self._record = self._active._record
             self._active = self.mapping[key]
             self._active._parent = self._parent
+            self._active._prior = self._prior
+            if self._transfer_record:
+                self._active._record = self._record
+            else:
+                self._record = self._active._record
             return True
         except KeyError:
             raise KeyError(f'ReferenceMappedParser read an unexpected key: {key}')
-
-    def switchActive(self, key):
-        if key not in self.mapping:
-            raise KeyError(f'key {key} not in mapping')
-        self._getParser()
-        self._record = self._active._record
 
     def getSize(self):
         if not self._getParser():
             return None
         return self._active.getSize()
-    
+
+    def _getRecordSize(self):
+        return self._active._getRecordSize()
+
     def getAllRecords(self):
         if not self._getParser():
             raise KeyError('ReferenceMappedParser read a None record for key value')
-        self._active.setRecord(self.getRecord())
         return self._active.getAllRecords()
-    
+
     def __str__(self):
         if not self._getParser():
             raise KeyError('ReferenceMappedParser read a None record for key value')
-        self._active._record = self._record
         return str(self._active)
-    
+
     def parse(self, buffer: BytesIO):
         if not self._getParser():
             raise KeyError('ReferenceMappedParser read a None record for key value')
         self._active.parse(buffer)
-        self._record = self._active._record
+        self.setRecord(self._active.getRecord())
 
     def unparse(self, buffer: BytesIO):
         if not self._getParser():
             raise KeyError('ReferenceMappedParser read a None record for key value')
-        # self._active._record = self._record
         self._active.unparse(buffer)
 
     def getReference(self, reference: extendedReference):
         if not self._getParser():
             raise KeyError('ReferenceMappedParser read a None record for key value')
-        self._active._record = self._record
         return self._active.getReference(reference)
-    
+
 class EOFParser(Parser):
 
     def getSize(self):
@@ -725,6 +778,9 @@ class EOFParser(Parser):
     def __str__(self):
         return str(self._record)
     
+    def _getRecordSize(self):
+        return 0
+    
 class HexParser(Parser):
 
     def __init__(self, id: str, size: extendedReference = None, little_endian=True):
@@ -736,13 +792,19 @@ class HexParser(Parser):
         hex_bytes = [format(byte, '02X') for byte in content]
         if self.little_endian:
             hex_bytes = reversed(hex_bytes)
-        self._record = ''.join(hex_bytes)
+        self.setRecord(''.join(hex_bytes))
         
     def unparse(self, buffer: BytesIO):
-        hex_bytes = bytes.fromhex(self._record)
+        hex_bytes = bytes.fromhex(self.getRecord())
         if self.little_endian:
             hex_bytes = bytes(reversed(hex_bytes))
         buffer.write(hex_bytes)
+
+    def _getRecordSize(self):
+        if callable(self._size):
+            return self._size()
+        else:
+            return self._size
 
 class NoneParser(Parser):
     """A parser which does absolutely nothing"""
@@ -754,6 +816,9 @@ class NoneParser(Parser):
     
     def unparse(self, buffer: BytesIO):
         return
+    
+    def _getRecordSize(self):
+        return 0
 
 class ErrorParser(Parser):
     """A parser which raises an error on parse or unparse"""
@@ -770,7 +835,10 @@ class ErrorParser(Parser):
 
     def getSize(self):
         return 0
-    
+
+    def _getRecordSize(self):
+        return 0
+
 class SourceDeletingParser(BlockParser):
     """A parser which removes its source from the buffer after parsing. Otherwise it behaves like a BlockParser"""
 
@@ -782,3 +850,6 @@ class SourceDeletingParser(BlockParser):
         buffer.write(remainder)
         buffer.truncate()
         buffer.seek(start)
+
+    def _getRecordSize(self):
+        return 0 #TODO check this behavior
