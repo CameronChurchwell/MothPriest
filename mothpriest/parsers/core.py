@@ -1,16 +1,14 @@
 import struct
 from collections import OrderedDict
-import warnings
 from typing import Union, List, Callable, Dict
 from functools import partial
 from io import BytesIO
 from PIL import Image
 import json
-import tqdm
 
 from mothpriest.references import List
 from ..references import *
-from ..buffers import OffsetBuffer, DivergentBuffer
+from ..buffers import DivergentBuffer
 
 VERBOSE = False
 
@@ -37,10 +35,11 @@ class Parser():
         self._record = None
 
     def getID(self):
-        """Returns the id of this element"""
+        """Returns the id of this parser"""
         return self.id
 
     def getSize(self):
+        """Calculates the best guess for the current size of this parser in bytes. See documentation on References for more information"""
         if self._record is not None and (isinstance(self._size, int) or self._size is None): # We have an actual record and a constant size
             return self._size
         if isinstance(self._size, int): # We have a fixed value
@@ -71,16 +70,20 @@ class Parser():
             return self._size
 
     def getRecord(self):
+        """Returns the value of the record of this parser. 
+        If self._record stores a function, it returns the return value fo that function"""
         if callable(self._record):
             return self._record()
         return self._record
 
     def setRecord(self, value):
+        """Set the record stored in this parser"""
         if callable(self._record):
             raise ValueError('Cannot manually set a record which is referenced elsewhere')
         self._record = value
 
     def getPosition(self):
+        """Calculates the best guess for the current size of this parser in bytes. See documentation on References for more information"""
         if self._record is not None and (isinstance(self._position, int) or self._position is None): # We have an actual record and a constant position
             return self._position
         elif isinstance(self._position, int): # We have a fixed value but no record yet
@@ -103,6 +106,7 @@ class Parser():
             return self._position
 
     def parse(self, buffer: BytesIO):
+        """Parse a buffer of bytes. The buffer must be readable, seekable, writable, and allow backwards seeking"""
         parserPosition = self.getPosition()
         if parserPosition is not None:
             position = buffer.tell()
@@ -117,13 +121,7 @@ class Parser():
         self.setRecord(buffer.read(self.getSize()))
 
     def unparse(self, buffer: BytesIO):
-        parserPosition = self.getPosition()
-        position = buffer.tell()
-        # if parserPosition is None:
-        #     import pdb; pdb.set_trace()
-        # if position != parserPosition:
-        #     import pdb; pdb.set_trace()
-
+        """Write the record stored in this parser out to a buffer. This should reverse the actions of `parse()`"""
         startPosition = buffer.tell()
         buffer.write(self.getRecord())
         endPosition = buffer.tell()
@@ -168,6 +166,7 @@ class Parser():
         self.unparse = deferredUnparse
 
     def getAllRecords(self):
+        """Return all of the records stored in a parser and its children"""
         return str(self.getRecord())
 
     def __str__(self):
@@ -175,11 +174,11 @@ class Parser():
         return str(self.getRecord())
 
     def __call__(self, buffer: BytesIO):
+        """Equivalent to `Parser.parse`"""
         self.parse(buffer)
 
-    def getReference(self, reference: Union[Reference, str, int, List[str]]):
-        """allows the use of strings and lists of strings in place of the corresponding Reference subclasses
-        Return value indicates if anything was changed or not""" #TODO this seems very poor documentation
+    def getReference(self, reference: extendedReference):
+        """Retrieve a record value from a reference, starting the search from this parser"""
         ref = Reference.fromOther(reference)
         return ref.retrieveRecord(self)
 
@@ -395,7 +394,7 @@ class BlockParser(Parser):
             self._record[element.getID()] = element
 
     def getSize(self):
-        if self._size is None: #TODO change this to check for equality
+        if self._size is None: #TODO change this to enforce correct size?
             total = 0
             for id, element in self._record.items():
                 size = element.getSize()
@@ -450,30 +449,15 @@ class BlockParser(Parser):
         del self.getRecord()[key]
 
     def appendParser(self, parser: Parser):
+        """Append a parser to the end of the block"""
         id = parser.getID()
         assert id not in self
         self.getRecord()[parser.getID()] = parser
 
     def parse(self, buffer: BytesIO):
         size = self.getSize()
-        # if size is not None:
-        #     start = buffer.tell()
         for id, element in self.items():
             element.parse(buffer)
-        # if size is not None and buffer.tell() - start != size:
-        #     raise ValueError('parsed too much')
-        # else:
-        #     data = buffer.read(size)
-        #     with BytesIO(data) as tempbuf:
-        #         for id, element in self.items():
-        #             element.parse(tempbuf)
-        #         remainder = tempbuf.read()
-        #         if len(remainder) > 0:
-        #             self.appendParser(Parser('_remainder', None))
-        #             with BytesIO(remainder) as remainder_buffer:
-        #                 self._record['_remainder'].parse(remainder_buffer)
-        # TODO change to avoid copy (use difference refs?)
-        #  goal is to get rid of the reference size chunk parser
 
     def unparse(self, buffer: BytesIO):
         startPosition = buffer.tell()
@@ -494,6 +478,7 @@ class BlockParser(Parser):
             self.positionParser.deferUnparsing()
 
 class ReferenceCountParser(Parser):
+    """Parser for parsing a reference-determined amount of the same structure/entry"""
 
     def __init__(self, id: str, count_id: Reference, element_factory: Callable[[int], Parser], position: extendedReference = None):
         super().__init__(id, position=position)
@@ -604,25 +589,30 @@ class ReferenceCountParser(Parser):
             self.countParser.deferUnparsing()
 
     def append(self, new_value):
+        """Append a new parser to the end of the block and set its record to `new_value`"""
         new_parser = self.element_factory(self.getCount)
         new_parser.setRecord(new_value)
         self.getRecord().append(new_parser)
 
-    def insert(self, idx, value):
+    def insert(self, idx, new_value):
+        """Insert a new parser into the block and set its record to `new_value`"""
         initial_count = self.getCount()
         new_parser = self.element_factory(idx)
-        new_parser.setRecord(value)
+        new_parser.setRecord(new_value)
         self.getRecord().insert(idx, new_parser)
         for i in range(idx+1, initial_count+1):
             self.getRecord()[i].id = i
 
     def mapReference(self, reference: Reference, get_record: bool = False):
+        """Get the value of a reference when mapped onto every child of this parser"""
         if get_record:
             return [p.getReference(reference)._record for p in self]
         else:
             return [p.getReference(reference) for p in self]
 
 class TransformationParser(BlockParser):
+    """Apply a transformation to the bytes of a buffer before parsing. Similarly, applies an inverse transform after unparsing.
+    Otherwise, this behaves like a BlockParser"""
 
     def __init__(self, id: str, size: extendedReference, transform, transformInverse, elements: List[Parser], position: extendedReference=None, in_place=False):
         super().__init__(id, elements, size, position)
@@ -720,6 +710,7 @@ class BytesExpansionParser(TransformationParser):
         super().__init__(id, ConstIntegerReference(size), partial(self._expand, bit_sizes=bit_sizes), partial(self._contract, bit_sizes=bit_sizes), [parser])
 
 class PDBParser(Parser):
+    """A parser which sets a breakpoint in parsing and unparsing"""
 
     def __init__(self):
         super().__init__('pdb')
@@ -737,6 +728,7 @@ class PDBParser(Parser):
         return 0
 
 class ReferenceMappedParser(Parser):
+    """A parser which uses a reference and dictionary of parsers to determine which dictionary entry to use to parse"""
 
     def __init__(self, id: str, key_id: Reference, mapping: dict, transfer_record=True):
         super().__init__(id)
@@ -747,6 +739,7 @@ class ReferenceMappedParser(Parser):
         self._transfer_record = transfer_record
 
     def getKey(self):
+        """Get the value of the key determining the current active parser"""
         if self._active is None:
             keyParser = self._parent.getReference(self.key_id)
             if keyParser.getRecord() is None:
@@ -756,6 +749,7 @@ class ReferenceMappedParser(Parser):
         return self._key
 
     def setKey(self, key):
+        """Set the value of the key determining the current active parser"""
         import pdb; pdb.set_trace()
         if key not in self.mapping:
             raise KeyError(f'key {key} not in mapping')
@@ -763,6 +757,7 @@ class ReferenceMappedParser(Parser):
         self._getParser()
 
     def _getParser(self):
+        """Ensure that the currently active parser is the one pointed to by the current key"""
         key = self.getKey()
         if key is None:
             return False
@@ -811,9 +806,10 @@ class ReferenceMappedParser(Parser):
         return self._active.getReference(reference)
 
 class EOFParser(Parser):
+    """Parser which enforces EOF during parsing, but currently not during unparsing"""
 
     def getSize(self):
-        return None
+        return None # greedy, always read everything remaining
 
     def __init__(self):
         super().__init__('_eof')
@@ -835,6 +831,7 @@ class EOFParser(Parser):
         return str(self._record)
 
 class HexParser(Parser):
+    """A parser for reading hex values"""
 
     def __init__(self, id: str, size: extendedReference = None, position: extendedReference = None, little_endian=True):
         super().__init__(id, size)
@@ -867,11 +864,8 @@ class NoneParser(Parser):
     def unparse(self, buffer: BytesIO):
         return
 
-    def _getRecordSize(self):
-        return 0
-
 class ErrorParser(Parser):
-    """A parser which raises an error on parse or unparse"""
+    """A parser which raises an error on parse or unparse. Useful in conjunction with `ReferenceMappedParser`"""
 
     def __init__(self, id: str, error: Exception):
         super().__init__(id)
@@ -941,15 +935,3 @@ class BackFoldingParser(BlockParser):
 
             # copy unparsed content back to original buffer
             buffer.write(tempBuf.read())
-
-class SourceDeletingParser(BlockParser):
-    """A parser which removes its source from the buffer after parsing. Otherwise it behaves like a BlockParser"""
-
-    def parse(self, buffer: BytesIO):
-        start = buffer.tell()
-        super().parse(buffer)
-        remainder = buffer.read()
-        buffer.seek(start)
-        buffer.write(remainder)
-        buffer.truncate()
-        buffer.seek(start)
