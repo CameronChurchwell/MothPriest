@@ -1,18 +1,3 @@
-# MothPriest
-
-Python module for creating intuitive file parsers.
-
-Imagine you have a file with the following structure:
-
-| Field | Size (Bytes) | Value |
-|----------|----------|----------|
-| Magic | 6 | "STRING" |
-| StringSize | 4 | uint32 (little endian) size String in bytes |
-| String | StringSize | string data for this file |
-
-MothPriest makes parsing and editing this file simple:
-
-```Python
 from io import BytesIO
 from mothpriest.parsers import *
 
@@ -21,7 +6,7 @@ parser = BlockParser(
     [
         MagicParser("STRING", "Magic"),
         IntegerParser("StringSize", size=4, little_endian=True, signed=False),
-        StringParser("String", size="StringSize") # Note the reference back to StringSize
+        StringParser("String", size="StringSize")
     ]
 )
 
@@ -41,4 +26,3 @@ with BytesIO() as buffer:
 
 # Note how StringSize is updated automatically
 assert output_data == b"STRING\x2B\x00\x00\x00The quick brown fox jumps over the lazy dog"
-```

@@ -12,13 +12,6 @@ from ..buffers import DivergentBuffer
 
 VERBOSE = False
 
-# def changingOP(method):
-#     def wrapper(instance: Parser, *args, **kwargs):
-#         value = method(instance, *args, **kwargs)
-#         instance._changed = True
-#         return value
-#     return wrapper
-
 class Parser():
     """Abstract base class for parser objects"""
 
