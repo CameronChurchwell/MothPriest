@@ -104,11 +104,9 @@ class Parser():
         if parserPosition is not None:
             position = buffer.tell()
             if parserPosition < position:
-                # import pdb; pdb.set_trace()
                 raise ValueError(f'parsing has already exceeded the position of parser {self.getID()}. \
                                  Currently at ({position}) and parser is positioned at ({parserPosition})')
             elif parserPosition > position:
-                # import pdb; pdb.set_trace()
                 buffer.read(parserPosition - position)
 
         self.setRecord(buffer.read(self.getSize()))
@@ -211,26 +209,14 @@ class StructValueParser(Parser):
         """returns a list of unpacked values"""
         super().parse(buffer)
         if self.getRecord() is None or len(self.getRecord()) == 0:
-            import pdb; pdb.set_trace()
             self.getRecord()
         self.setRecord(struct.unpack(self.format_string, self.getRecord()))
-        # data = buffer.read(self.getSize())
-        # self._record = struct.unpack(self.format_string, data)
 
     def unparse(self, buffer: BytesIO):
-        parserPosition = self.getPosition()
-        position = buffer.tell()
-        # if parserPosition is None:
-        #     import pdb; pdb.set_trace()
-        # if position != parserPosition:
-        #     import pdb; pdb.set_trace()
         try:
-            try:
-                packed = struct.pack(self.format_string, *self.getRecord())
-            except TypeError:
-                packed = struct.pack(self.format_string, self.getRecord())
-        except:
-            import pdb; pdb.set_trace()
+            packed = struct.pack(self.format_string, *self.getRecord())
+        except TypeError:
+            packed = struct.pack(self.format_string, self.getRecord())
             self.getRecord()
         startPosition = buffer.tell()
         buffer.write(packed)
@@ -547,11 +533,9 @@ class ReferenceCountParser(Parser):
         if parserPosition is not None:
             position = buffer.tell()
             if parserPosition < position:
-                # import pdb; pdb.set_trace()
                 raise ValueError(f'parsing has already exceeded the position of parser {self.getID()}. \
                                  Currently at ({position}) and parser is positioned at ({parserPosition})')
             elif parserPosition > position:
-                import pdb; pdb.set_trace()
                 buffer.read(parserPosition - position)
         count = self.getCount()
         record = self.getRecord()
@@ -743,7 +727,6 @@ class ReferenceMappedParser(Parser):
 
     def setKey(self, key):
         """Set the value of the key determining the current active parser"""
-        import pdb; pdb.set_trace()
         if key not in self.mapping:
             raise KeyError(f'key {key} not in mapping')
         self._key = key
