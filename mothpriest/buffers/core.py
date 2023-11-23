@@ -19,25 +19,6 @@ class OffsetBuffer(BytesIO):
             raise IOError('Cannot seek before the offset of an OffsetBuffer object')
         return super().seek(__offset - self.offset, __whence)
 
-# class WarpBuffer(BytesIO):
-
-#     def __init__(self, buffer: BytesIO, offset: int, size: int):
-#         self.buffer = buffer
-#         self.start = offset
-#         self.end = offset + size
-
-#     # def __getattribute__(self, __name: str) -> Any:
-#     #     if __name in ['tell', 'read', 'write', 'seek', 'buffer', 'start', 'getbuffer', 'end', '__getattribute__', '__init__']:
-#     #         return object.__getattribute__(self, __name)
-#     #     else:
-#     #         return self.buffer.__getattribute__(__name)
-        
-#     def seek(self, __offset: int, __whence: int = 0 )-> int:
-#         return super().seek(__offset, __whence)
-
-#     def tell(self) -> int:
-#         return 999
-
 class DivergentBuffer(BytesIO):
 
     def __init__(self, original: BytesIO, offset: int=0) -> None:

@@ -5,6 +5,7 @@ from functools import partial
 from io import BytesIO
 from PIL import Image
 import json
+import hashlib
 
 from mothpriest.references import List
 from ..references import *
@@ -234,43 +235,37 @@ class StructValueParser(Parser):
             # re-defer unparsing on the positionParser
             self.positionParser.deferUnparsing()
 
-class IntegerParser(StructValueParser):
+class IntegerParser(Parser):
     """Class for parsing packed integers with a given size"""
-    mapping = {
-        1: 'b',
-        2: 'h',
-        4: 'i'
-    }
 
     def __init__(self, id: str, size: extendedReference, little_endian: bool = True, signed=False, position: extendedReference = None):
         """Pass a valid size (number of bytes), endianness, and whether or not the value is signed or unsigned"""
-        if not self.getReference(size)._record in self.mapping.keys():
-            raise ValueError('Size not supported')
-
-        format_string = self.mapping[size]
-        if not signed:
-            format_string = format_string.upper()
-
-        if little_endian:
-            format_string = '<' + format_string
-        else:
-            format_string = '>' + format_string
-
-        super().__init__(size, format_string, id, position=position)
+        super().__init__(id, size=size, position=position)
+        self.little_endian = little_endian
+        self.signed = signed
 
     def getAllRecords(self):
         return self.getRecord()
 
     def parse(self, buffer: BytesIO):
-        """returns a parsed integer"""
+        """parses a single integer"""
         super().parse(buffer)
-        values = self._record
-        try:
-            assert len(values) == 1
-            assert isinstance(values[0], int)
-        except:
-            raise ValueError(f'failed to parse integer, got {values}')
-        self._record = values[0]
+        self._record = int.from_bytes(
+            self._record, 
+            byteorder = 'little' if self.little_endian else 'big',
+            signed = self.signed
+        )
+
+    def unparse(self, buffer: BytesIO):
+        record = self._record
+        self._record = self.getRecord().to_bytes(
+            self.getSize(),
+            byteorder = 'little' if self.little_endian else 'big',
+            signed = self.signed
+        )
+        super().unparse(buffer)
+        self._record = record
+
 
 class StringParser(Parser):
     """Class for parsing reference-sized strings"""
@@ -911,3 +906,78 @@ class BackFoldingParser(BlockParser):
 
             # copy unparsed content back to original buffer
             buffer.write(tempBuf.read())
+
+class IntegrityParser(BlockParser):
+    """A parser for handling checksums that are built into files. Functions like a BlockParser"""
+
+    def __init__(self, id: str, elements: List[Parser], checksumFunction: Union[Callable, str], checksum: extendedReference, size=None, position=None):
+        """checksumFunction can be either a callable or the name of a hash function accessible in the top level of hashlib (e.g. 'md5')"""
+        super().__init__(id, elements, size, position)
+        if callable(checksumFunction):
+            self.checksumFunction = checksumFunction
+        elif isinstance(checksumFunction, str):
+            try:
+                hashFunction = getattr(hashlib, checksumFunction)
+                def checksumInt(x: bytes):
+                    return int(hashFunction(x).hexdigest(), 16)
+                self.checksumFunction = checksumInt
+            except AttributeError:
+                raise AttributeError(f"Could not find hash function {checksumFunction} in hashlib, try supplying manually")
+        else:
+            raise ValueError("checksumFunction must be either a function or a string")
+        self._checksum = checksum
+        self.checksumParser = None
+
+    def getChecksum(self):
+        """Calculates the best guess for the current checksum of this parser. See documentation on References for more information"""
+        if isinstance(self._checksum, int):
+            return self._checksum
+        else:
+            self._checksum = Reference.fromOther(self._checksum)
+            # Assure self is not an orphan
+            if self._parent is None:
+                raise ValueError('cannot retrieve reference from orphan parser')
+            # Get the referenced parser for the checksum
+            checksumParser = self._parent.getReference(self._checksum)
+            # Get the value stored in the reference
+            value = checksumParser.getRecord()
+            # If the checksum parser has no record yet, do nothing
+            if value is None:
+                raise ValueError('Checksum parser has no record, cannot get checksum value')
+            # Link the size parser to this object
+            checksumParser._record = self.getChecksum
+            if hasattr(checksumParser, 'deferUnparsing'):
+                checksumParser.deferUnparsing()
+                self.checksumParser = checksumParser
+            # Now store the actual size in this object
+            self._checksum = value
+            # Return that size
+            return self._checksum
+
+    def parse(self, buffer: BytesIO):
+        startPosition = buffer.tell()
+        super().parse(buffer)
+        endPosition = buffer.tell()
+
+        checksum = self.getChecksum()
+
+        buffer.seek(startPosition)
+        content = buffer.read(endPosition-startPosition)
+
+        computed = self.checksumFunction(content)
+        if computed != checksum:
+            raise ValueError(f"Checksum validation failed for {self.getID()}: {computed} != {checksum}")
+
+    def unparse(self, buffer: BytesIO):
+        startPosition = buffer.tell()
+        super().unparse(buffer)
+        endPosition = buffer.tell()
+
+        buffer.seek(startPosition)
+        content = buffer.read(endPosition-startPosition)
+
+        computed = self.checksumFunction(content)
+
+        self._checksum = computed
+        self.checksumParser.unparse(buffer)
+        self.checksumParser.deferUnparsing()
