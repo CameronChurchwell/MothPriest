@@ -8,3 +8,5 @@ uint32 = partial(IntegerParser, size=4)
 
 # floating point
 float32 = lambda id: StructValueParser(4, 'f', id)
+
+float16 = lambda id: StructValueParser(2, 'e', id)

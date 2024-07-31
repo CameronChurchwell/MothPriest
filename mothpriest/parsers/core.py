@@ -6,6 +6,7 @@ from io import BytesIO
 from PIL import Image
 import json
 import hashlib
+from decimal import getcontext, Decimal
 
 from mothpriest.references import List
 from ..references import *
@@ -135,6 +136,11 @@ class Parser():
 
         originalUnparse = self.unparse
 
+        def alreadyDeferred():
+            #TODO make this a warning
+            print('unparsing already deferred!')
+            return False
+
         def deferredUnparse(buffer: BytesIO):
             startPosition = buffer.tell()
 
@@ -156,6 +162,12 @@ class Parser():
             self.unparse = backtrackingUnparse
 
         self.unparse = deferredUnparse
+
+        # lock out deferrence so that we don't have multiple parsers trying to
+        #  update this parser
+        self.deferUnparsing = alreadyDeferred
+
+        return True
 
     def getAllRecords(self):
         """Return all of the records stored in a parser and its children"""
@@ -456,7 +468,7 @@ class ReferenceCountParser(Parser):
 
     def __init__(self, id: str, count_id: Reference, element_factory: Callable[[int], Parser], position: extendedReference = None):
         super().__init__(id, position=position)
-        self._record: List[Parser] = []
+        self._record: List[Parser] = None
         self.count_id = count_id
         self.element_factory = element_factory
         self._count = -1
@@ -464,18 +476,28 @@ class ReferenceCountParser(Parser):
 
     def getSize(self):
         count = self.getCount()
-        if count is None:
+        if count is None or self.getRecord() is None:
             return None
-        if len(self.getRecord()) != count:
-            raise ValueError(f'length of self._record ({len(self.getRecord())}) must be equal to self._count ({self.getCount()})')
+        #TODO investigate
+        # if len(self.getRecord()) == 0:
+        #     return None
+        # if len(self.getRecord()) != count:
+        #     import pdb; pdb.set_trace()
+        #     raise ValueError(f'length of self._record ({len(self.getRecord())}) must be equal to self._count ({self.getCount()})')
         total = 0
         for element in self.getRecord():
             size = element.getSize()
             total += size
         return total
 
+    def assertRecord(self):
+        if self._record is None:
+            raise ValueError(f"ReferenceCountParser {self.getID()} has no records yet!")
+
     def _getRecordSize(self):
         total = 0
+        if self._record is None:
+            return None
         for element in self.getRecord():
             size = element._getRecordSize()
             if size is None:
@@ -485,20 +507,26 @@ class ReferenceCountParser(Parser):
 
     def getCount(self):
         if self._count == -1: # We don't have a count yet, get from reference
+
+            if self._parent is None:
+                import pdb; pdb.set_trace()
             countParser = self._parent.getReference(self.count_id)
             value = countParser.getRecord()
             if value is None:
                 return None
-            countParser._record = self.getCount
-            if hasattr(countParser, 'deferUnparsing'):
+            if hasattr(countParser, 'deferUnparsing') and countParser.deferUnparsing():
+                countParser._record = self.getCount
                 self.countParser = countParser
-                self.countParser.deferUnparsing()
-            self._count = value
+                self._count = value
+                return self._count
+            return value
+        elif self._record is None: # We have a count, but no elements have been added or parsed
             return self._count
         self._count = len(self.getRecord())
         return self._count
 
     def getAllRecords(self):
+        self.assertRecord()
         records = [parser.getAllRecords() for parser in self.getRecord()]
         return records
 
@@ -510,17 +538,21 @@ class ReferenceCountParser(Parser):
         return self.getCount() #TODO potentially really confusing
 
     def __iter__(self):
+        self.assertRecord()
         return iter(self._record)
 
     def __getitem__(self, idx: int):
+        self.assertRecord()
         if isinstance(idx, tuple):
             idx = list(idx)
         return self.getReference(idx)
 
     def __setitem__(self, ref, value):
+        self.assertRecord()
         self.getReference(ref).setRecord(value)
 
     def __delitem__(self, idx):
+        self.assertRecord()
         del self.getRecord()[idx]
 
     def parse(self, buffer: BytesIO):
@@ -534,12 +566,16 @@ class ReferenceCountParser(Parser):
                 buffer.read(parserPosition - position)
         count = self.getCount()
         record = self.getRecord()
+        if record is None:
+            self._record = []
+            record = self.getRecord()
         for i in range(0, count):
             record.append(self.element_factory(i))
             record[i]._parent = self
             record[i].parse(buffer)
 
     def unparse(self, buffer: BytesIO):
+        self.assertRecord()
         elements = self.getRecord()
         self._count = len(elements)
         # iterator = tqdm.tqdm(elements, desc=self.getID(), total=len(elements))
@@ -557,13 +593,18 @@ class ReferenceCountParser(Parser):
         if self.countParser is not None:
             # call the backtrackingUnparse method wrapping countParser.unparse
             self.countParser.unparse(buffer)
-            # re-defer unparsing ont the countParser
+            # re-defer unparsing on the countParser
             self.countParser.deferUnparsing()
 
-    def append(self, new_value):
-        """Append a new parser to the end of the block and set its record to `new_value`"""
-        new_parser = self.element_factory(self.getCount)
-        new_parser.setRecord(new_value)
+    def append(self, new_value=None):
+        """Append a new parser to the end of the block and set its record to `new_value`
+        if new_value is None, then it does not change the record of the newly created parser"""
+        if self.getRecord() is None:
+            self._record = []
+        new_parser = self.element_factory(len(self._record))
+        new_parser._parent = self
+        if new_value is not None:
+            new_parser.setRecord(new_value)
         self.getRecord().append(new_parser)
 
     def insert(self, idx, new_value):
@@ -571,12 +612,15 @@ class ReferenceCountParser(Parser):
         initial_count = self.getCount()
         new_parser = self.element_factory(idx)
         new_parser.setRecord(new_value)
+        if self.getRecord() is None:
+            self._record = []
         self.getRecord().insert(idx, new_parser)
         for i in range(idx+1, initial_count+1):
             self.getRecord()[i].id = i
 
     def mapReference(self, reference: Reference, get_record: bool = False):
         """Get the value of a reference when mapped onto every child of this parser"""
+        self.assertRecord()
         if get_record:
             return [p.getReference(reference)._record for p in self]
         else:
@@ -651,35 +695,64 @@ class BytesExpansionParser(TransformationParser):
     def _expand(self, data: bytes, bit_sizes: List[int]):
         result = b''
         bits = ''.join([format(byte, '08b') for byte in data])
-        for bit_size in bit_sizes:
-            current_bits = bits[:bit_size]
-            bits = bits[bit_size:]
-            offset = (8 - bit_size) % 8
-            for i in range(-offset, bit_size-offset, 8):
-                byte_value = int(current_bits[max(i, 0):i+8], 2)
-                result += struct.pack('B', byte_value)
+        while len(bits) > 0:
+            for bit_size in bit_sizes:
+                if len(bits) < bit_size:
+                    return result
+                current_bits = bits[:bit_size]
+                bits = bits[bit_size:]
+                offset = (8 - bit_size) % 8
+                for i in range(-offset, bit_size-offset, 8):
+                    byte_value = int(current_bits[max(i, 0):i+8], 2)
+                    result += struct.pack('B', byte_value)
         return result
 
     def _contract(self, data: bytes, bit_sizes: List[int]):
         bits = ''
         data_array = bytearray(data)
-        for bit_size in bit_sizes:
-            remainder = bit_size % 8
-            if remainder != 0:
-                bits += format(data_array.pop(0), f'0{remainder}b')
-            for _ in range(0, bit_size // 8):
-                bits += format(data_array.pop(0), '08b')
-        assert len(bits) / 8 == self.getSize(), breakpoint()
+        while len(data_array) > 0:
+            for bit_size in bit_sizes:
+                remainder = bit_size % 8
+                if remainder != 0:
+                    bits += format(data_array.pop(0), f'0{remainder}b')
+                for _ in range(0, bit_size // 8):
+                    bits += format(data_array.pop(0), '08b')
+        assert len(bits) / 8 == self.getSize() or self.repeat, breakpoint()
+        if len(bits) % 8 > 0:
+            bits += '0' * len(bits) % 8
         result = b''
         for i in range(0, self.getSize()):
             result += struct.pack('B', int(bits[i*8:i*8+8], 2))
         return result
 
-    def __init__(self, id: str, size: int, bit_sizes: List[int], parser: Parser):
+    def __init__(self, id: str, size: int, bit_sizes: List[int], parser: Parser, repeat=False):
         """Note that size here indicates the size in bytes, not bits"""
-        if size != sum(bit_sizes) / 8:
-            raise ValueError('Number of bits must add up to 1/8th the number of bytes')
-        super().__init__(id, ConstIntegerReference(size), partial(self._expand, bit_sizes=bit_sizes), partial(self._contract, bit_sizes=bit_sizes), [parser])
+        if not repeat and size != sum(bit_sizes) / 8:
+            raise ValueError('Number of bits must add up to 1/8th the number of bytes or repeat must be enabled')
+        self.repeat = repeat
+        super().__init__(id, size, partial(self._expand, bit_sizes=bit_sizes), partial(self._contract, bit_sizes=bit_sizes), [parser])
+
+class FixedPointParser(IntegerParser):
+    """A parser for fixed point numbers"""
+
+    def __init__(self, id: str, size: int, fractional_bits: int = 0, signed: bool = False):
+        super().__init__(id, size=size, signed=signed, little_endian=False)
+        self.fractional_bits = fractional_bits
+        assert fractional_bits + signed <= 8 * size
+
+    def parse(self, buffer: BytesIO):
+        super().parse(buffer)
+        value = self._record
+        value = float(value) / (2 ** self.fractional_bits)
+        self._record = value
+
+    def unparse(self, buffer: BytesIO):
+        value = self._record
+        value = int(value * (2 ** self.fractional_bits))
+        if len(bin(value)[:2]) > self.getSize() * 8:
+            import pdb; pdb.set_trace()
+        self._record = value
+        super().unparse(buffer)
 
 class PDBParser(Parser):
     """A parser which sets a breakpoint in parsing and unparsing"""

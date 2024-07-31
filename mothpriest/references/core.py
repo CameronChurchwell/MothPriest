@@ -44,6 +44,8 @@ class IDReference(Reference):
             return parser._record[self.id]
         except (KeyError, IndexError):
             raise ValueError(f'failed to find reference {self.id} in record {parser._record}')
+        except TypeError:
+            import pdb; pdb.set_trace()
         
 class IDListReference(Reference):
     """Class implementing ID references which traverse levels in the record"""
