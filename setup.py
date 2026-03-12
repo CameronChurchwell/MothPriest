@@ -1,16 +1,8 @@
-from distutils.core import setup
+from setuptools import find_packages, setup
 
-setup(
-    name='MothPriest',
-    version='1.0.0',
-    description='Module for creating intuitive and efficient file parsers',
-    author='Cameron Churchwell',
-    author_email='cameronchurchwell@icloud.com',
-    install_requires=[
-        'pathlib',
-        'typing',
-        'Pillow',
-        'pytest'
-    ],
-    packages=['mothpriest'],
-)
+
+with open('README.md') as file:
+    long_description = file.read()
+
+
+setup(packages=find_packages())

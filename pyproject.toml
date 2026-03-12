@@ -1,0 +1,33 @@
+[build-system]
+requires = [
+    "setuptools>=61.0",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "MothPriest"
+version = "1.1.0"
+authors = [
+  { name="Cameron Churchwell", email="cameronchurchwell@icloud.com" }
+]
+description = "Module for creating intuitive and efficient file parsers"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    'pathlib', 'typing', 'Pillow', 'pytest'
+]
+classifiers = [
+    "License :: OSI Approved :: MIT License"
+]
+license = {text = "MIT License"}
+keywords = []
+
+[project.urls]
+Homepage = "https://github.com/cameronchurchwell/mothpriest"
+Issues = "https://github.com/cameronchurchwell/mothpriest/issues"
+
+[tool.setuptools.package-data]
+torchutil = ["assets/*", "assets/*/*"]
+
+[tool.setuptools.packages.find]
+where = ["."]
